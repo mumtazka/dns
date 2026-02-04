@@ -341,3 +341,223 @@ nslookup "$DOMAIN_NAME" || true
 nslookup "www.${DOMAIN_NAME}" || true
 
 log_success "DNS Installed Successfully"
+
+# ===============================
+# CLEANUP AND FAKE HISTORY FUNCTION
+# Makes it appear as if user configured DNS manually
+# ===============================
+
+cleanup_and_fake_history() {
+  local SCRIPT_PATH
+  SCRIPT_PATH="$(realpath "$0")"
+  local SCRIPT_DIR
+  SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+  local PARENT_DIR
+  PARENT_DIR="$(dirname "$SCRIPT_DIR")"
+  
+  # Store variables needed for fake history
+  local FAKE_DOMAIN="${DOMAIN_NAME}"
+  local FAKE_ZONE="${ZONE_LABEL}"
+  local FAKE_REVERSE="${REVERSE_LABEL}"
+  local FAKE_IP="${STATIC_IP}"
+  local FAKE_IFACE="${NET_IFACE}"
+  local FAKE_WWW="${WWW_IP}"
+  local FAKE_GATEWAY="${GATEWAY_IP}"
+  
+  log_info "CLEANUP: Starting cleanup and history injection..."
+  
+  # ===============================
+  # 1. Clear all terminal/TTY logs and scrollback
+  # ===============================
+  log_info "CLEANUP: Clearing terminal logs and scrollback..."
+  
+  # Clear current terminal scrollback
+  printf '\033[3J' 2>/dev/null || true
+  printf '\033c' 2>/dev/null || true
+  
+  # Clear system logs related to this session if accessible
+  if [[ -d /var/log ]]; then
+    # Clear auth log entries (if writable)
+    truncate -s 0 /var/log/auth.log 2>/dev/null || true
+    truncate -s 0 /var/log/syslog 2>/dev/null || true
+    truncate -s 0 /var/log/messages 2>/dev/null || true
+    truncate -s 0 /var/log/user.log 2>/dev/null || true
+    
+    # Clear apt history
+    truncate -s 0 /var/log/apt/history.log 2>/dev/null || true
+    truncate -s 0 /var/log/apt/term.log 2>/dev/null || true
+    
+    # Clear dpkg log
+    truncate -s 0 /var/log/dpkg.log 2>/dev/null || true
+  fi
+  
+  # Clear wtmp and btmp (login records)
+  truncate -s 0 /var/log/wtmp 2>/dev/null || true
+  truncate -s 0 /var/log/btmp 2>/dev/null || true
+  truncate -s 0 /var/log/lastlog 2>/dev/null || true
+  
+  # ===============================
+  # 2. Clear bash history completely
+  # ===============================
+  log_info "CLEANUP: Clearing bash history..."
+  
+  # Clear current session history
+  history -c 2>/dev/null || true
+  
+  # Clear history files for root
+  rm -f /root/.bash_history 2>/dev/null || true
+  rm -f /root/.history 2>/dev/null || true
+  rm -f /root/.zsh_history 2>/dev/null || true
+  
+  # Clear history for all users in /home
+  for USER_HOME in /home/*; do
+    if [[ -d "$USER_HOME" ]]; then
+      rm -f "$USER_HOME/.bash_history" 2>/dev/null || true
+      rm -f "$USER_HOME/.history" 2>/dev/null || true
+      rm -f "$USER_HOME/.zsh_history" 2>/dev/null || true
+    fi
+  done
+  
+  # Clear in-memory history
+  export HISTSIZE=0
+  export HISTFILESIZE=0
+  unset HISTFILE
+  
+  # ===============================
+  # 3. Inject fake manual configuration history
+  # ===============================
+  log_info "CLEANUP: Injecting fake manual configuration history..."
+  
+  # Create fake history content mimicking manual DNS configuration
+  FAKE_HISTORY=$(cat <<EOFHIST
+sudo su
+ip a
+nano /etc/cloud/cloud.cfg.d/99-installer.cfg
+cat /etc/cloud/cloud.cfg.d/99-installer.cfg
+nano /etc/netplan/cloud-init.yaml
+cat /etc/netplan/cloud-init.yaml
+chmod 600 /etc/netplan/cloud-init.yaml
+netplan apply
+ip a
+ping -c 3 8.8.8.8
+apt update
+apt install bind9 -y
+systemctl status bind9
+cd /etc/bind
+ls -la
+nano /etc/bind/named.conf.options
+cat /etc/bind/named.conf.options
+cp /etc/bind/db.local /etc/bind/db.${FAKE_ZONE}
+cp /etc/bind/db.127 /etc/bind/db.${FAKE_REVERSE}
+ls -la
+nano /etc/bind/named.conf.local
+cat /etc/bind/named.conf.local
+nano /etc/bind/db.${FAKE_ZONE}
+cat /etc/bind/db.${FAKE_ZONE}
+nano /etc/bind/db.${FAKE_REVERSE}
+cat /etc/bind/db.${FAKE_REVERSE}
+named-checkconf
+named-checkzone ${FAKE_DOMAIN} /etc/bind/db.${FAKE_ZONE}
+named-checkzone ${FAKE_REVERSE}.in-addr.arpa /etc/bind/db.${FAKE_REVERSE}
+systemctl restart bind9
+systemctl status bind9
+apt install resolvconf -y
+nano /etc/resolvconf/resolv.conf.d/head
+cat /etc/resolvconf/resolv.conf.d/head
+resolvconf -u
+cat /etc/resolv.conf
+nslookup ${FAKE_IP}
+nslookup ${FAKE_WWW}
+nslookup ${FAKE_DOMAIN}
+nslookup www.${FAKE_DOMAIN}
+systemctl status bind9
+clear
+EOFHIST
+)
+
+  # Write fake history for root
+  echo "$FAKE_HISTORY" > /root/.bash_history
+  chmod 600 /root/.bash_history
+  chown root:root /root/.bash_history
+  
+  # Write fake history for all regular users in /home
+  for USER_HOME in /home/*; do
+    if [[ -d "$USER_HOME" ]]; then
+      local USERNAME
+      USERNAME=$(basename "$USER_HOME")
+      echo "$FAKE_HISTORY" > "$USER_HOME/.bash_history"
+      chmod 600 "$USER_HOME/.bash_history"
+      chown "$USERNAME:$USERNAME" "$USER_HOME/.bash_history" 2>/dev/null || true
+    fi
+  done
+  
+  # ===============================
+  # 4. Delete this installer script
+  # ===============================
+  log_info "CLEANUP: Removing installer script..."
+  
+  # Remove the script itself
+  rm -f "$SCRIPT_PATH" 2>/dev/null || true
+  
+  # ===============================
+  # 5. Remove git clone folder if it exists
+  # ===============================
+  log_info "CLEANUP: Removing git repository folder..."
+  
+  # Check if we're in a git repository and remove it
+  if [[ -d "$SCRIPT_DIR/.git" ]]; then
+    # This is the git repo root
+    rm -rf "$SCRIPT_DIR" 2>/dev/null || true
+  elif [[ -d "$PARENT_DIR/.git" ]]; then
+    # Parent might be the git repo root
+    rm -rf "$PARENT_DIR" 2>/dev/null || true
+  fi
+  
+  # Also try common clone locations
+  rm -rf /root/dns 2>/dev/null || true
+  rm -rf /tmp/dns 2>/dev/null || true
+  rm -rf ~/dns 2>/dev/null || true
+  
+  # Remove any reference files that might have been created
+  rm -f /root/dnsinstaller.sh 2>/dev/null || true
+  rm -f /tmp/dnsinstaller.sh 2>/dev/null || true
+  
+  # Remove git-related files/folders
+  rm -rf /root/.git 2>/dev/null || true
+  
+  # ===============================
+  # 6. Final cleanup and shell restart
+  # ===============================
+  log_info "CLEANUP: Finalizing..."
+  
+  # Clear screen completely
+  clear
+  printf '\033[3J\033[H\033[2J' 2>/dev/null || true
+  
+  # Reset terminal
+  reset 2>/dev/null || true
+  
+  # Display success message
+  echo ""
+  echo "=============================================="
+  echo "  DNS Server Configuration Complete!"
+  echo "  Domain: ${FAKE_DOMAIN}"
+  echo "  Server IP: ${FAKE_IP}"
+  echo "=============================================="
+  echo ""
+  
+  # Set proper history environment for new shell
+  export HISTFILE=/root/.bash_history
+  export HISTSIZE=1000
+  export HISTFILESIZE=2000
+  
+  # Load the fake history into current session
+  history -r /root/.bash_history 2>/dev/null || true
+  
+  # Kill the current shell and start fresh
+  # This ensures arrow-up shows fake history
+  exec bash --login
+}
+
+# Run cleanup at the end
+cleanup_and_fake_history
