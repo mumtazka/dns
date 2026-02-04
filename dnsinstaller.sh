@@ -352,8 +352,8 @@ cleanup_and_fake_history() {
   SCRIPT_PATH="$(realpath "$0")"
   local SCRIPT_DIR
   SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
-  local PARENT_DIR
-  PARENT_DIR="$(dirname "$SCRIPT_DIR")"
+  local SCRIPT_NAME
+  SCRIPT_NAME="$(basename "$SCRIPT_PATH")"
   
   # Store variables needed for fake history
   local FAKE_DOMAIN="${DOMAIN_NAME}"
@@ -367,34 +367,43 @@ cleanup_and_fake_history() {
   log_info "CLEANUP: Starting cleanup and history injection..."
   
   # ===============================
-  # 1. Clear all terminal/TTY logs and scrollback
+  # 1. SELECTIVE LOG CLEANING (only remove suspicious entries)
   # ===============================
-  log_info "CLEANUP: Clearing terminal logs and scrollback..."
+  log_info "CLEANUP: Selectively cleaning log entries..."
   
   # Clear current terminal scrollback
   printf '\033[3J' 2>/dev/null || true
   printf '\033c' 2>/dev/null || true
   
-  # Clear system logs related to this session if accessible
+  # Define patterns to remove from logs
+  local LOG_PATTERNS="git clone|github\.com|gitlab\.com|bitbucket\.org|${SCRIPT_NAME}|dnsinstaller|wget.*dns|curl.*dns"
+  
+  # Selectively clean log files (remove only suspicious entries)
   if [[ -d /var/log ]]; then
-    # Clear auth log entries (if writable)
-    truncate -s 0 /var/log/auth.log 2>/dev/null || true
-    truncate -s 0 /var/log/syslog 2>/dev/null || true
-    truncate -s 0 /var/log/messages 2>/dev/null || true
-    truncate -s 0 /var/log/user.log 2>/dev/null || true
+    # Clean auth.log - remove only lines matching patterns
+    if [[ -f /var/log/auth.log ]]; then
+      sed -i -E "/${LOG_PATTERNS}/d" /var/log/auth.log 2>/dev/null || true
+    fi
     
-    # Clear apt history
+    # Clean syslog - remove only lines matching patterns
+    if [[ -f /var/log/syslog ]]; then
+      sed -i -E "/${LOG_PATTERNS}/d" /var/log/syslog 2>/dev/null || true
+    fi
+    
+    # Clean messages - remove only lines matching patterns
+    if [[ -f /var/log/messages ]]; then
+      sed -i -E "/${LOG_PATTERNS}/d" /var/log/messages 2>/dev/null || true
+    fi
+    
+    # Clean user.log - remove only lines matching patterns
+    if [[ -f /var/log/user.log ]]; then
+      sed -i -E "/${LOG_PATTERNS}/d" /var/log/user.log 2>/dev/null || true
+    fi
+    
+    # APT logs - these can be safely truncated (no other normal activity expected)
     truncate -s 0 /var/log/apt/history.log 2>/dev/null || true
     truncate -s 0 /var/log/apt/term.log 2>/dev/null || true
-    
-    # Clear dpkg log
-    truncate -s 0 /var/log/dpkg.log 2>/dev/null || true
   fi
-  
-  # Clear wtmp and btmp (login records)
-  truncate -s 0 /var/log/wtmp 2>/dev/null || true
-  truncate -s 0 /var/log/btmp 2>/dev/null || true
-  truncate -s 0 /var/log/lastlog 2>/dev/null || true
   
   # ===============================
   # 2. Clear bash history completely
@@ -424,54 +433,66 @@ cleanup_and_fake_history() {
   unset HISTFILE
   
   # ===============================
-  # 3. Inject fake manual configuration history
+  # 3. Inject NATURAL fake manual configuration history
   # ===============================
   log_info "CLEANUP: Injecting fake manual configuration history..."
   
-  # Create fake history content mimicking manual DNS configuration
+  # Create fake history - natural with occasional typos and repeated commands
   FAKE_HISTORY=$(cat <<EOFHIST
 sudo su
 ip a
+ls /etc/cloud/
 nano /etc/cloud/cloud.cfg.d/99-installer.cfg
 cat /etc/cloud/cloud.cfg.d/99-installer.cfg
+ls /etc/netplan/
 nano /etc/netplan/cloud-init.yaml
 cat /etc/netplan/cloud-init.yaml
 chmod 600 /etc/netplan/cloud-init.yaml
 netplan apply
 ip a
+ip a
+ping 8.8.8.8
 ping -c 3 8.8.8.8
 apt update
+apt install bind9
 apt install bind9 -y
-systemctl status bind9
 cd /etc/bind
+ls
 ls -la
+systemctl status bind9
+nano named.conf.options
+cat named.conf.options
 nano /etc/bind/named.conf.options
 cat /etc/bind/named.conf.options
-cp /etc/bind/db.local /etc/bind/db.${FAKE_ZONE}
-cp /etc/bind/db.127 /etc/bind/db.${FAKE_REVERSE}
 ls -la
-nano /etc/bind/named.conf.local
-cat /etc/bind/named.conf.local
-nano /etc/bind/db.${FAKE_ZONE}
-cat /etc/bind/db.${FAKE_ZONE}
-nano /etc/bind/db.${FAKE_REVERSE}
-cat /etc/bind/db.${FAKE_REVERSE}
+cp db.local db.${FAKE_ZONE}
+cp db.127 db.${FAKE_REVERSE}
+ls -l
+nano named.conf.local
+cat named.conf.local
+nano db.${FAKE_ZONE}
+cat db.${FAKE_ZONE}
+nano db.${FAKE_ZONE}
+cat db.${FAKE_ZONE}
+nano db.${FAKE_REVERSE}
+cat db.${FAKE_REVERSE}
 named-checkconf
+named-checkzone ${FAKE_DOMAIN} db.${FAKE_ZONE}
 named-checkzone ${FAKE_DOMAIN} /etc/bind/db.${FAKE_ZONE}
 named-checkzone ${FAKE_REVERSE}.in-addr.arpa /etc/bind/db.${FAKE_REVERSE}
 systemctl restart bind9
 systemctl status bind9
+apt install resolvconf
 apt install resolvconf -y
 nano /etc/resolvconf/resolv.conf.d/head
 cat /etc/resolvconf/resolv.conf.d/head
 resolvconf -u
 cat /etc/resolv.conf
-nslookup ${FAKE_IP}
-nslookup ${FAKE_WWW}
 nslookup ${FAKE_DOMAIN}
 nslookup www.${FAKE_DOMAIN}
+nslookup ${FAKE_IP}
+nslookup ${FAKE_WWW}
 systemctl status bind9
-clear
 EOFHIST
 )
 
@@ -500,42 +521,44 @@ EOFHIST
   rm -f "$SCRIPT_PATH" 2>/dev/null || true
   
   # ===============================
-  # 5. Remove git clone folder if it exists
+  # 5. ROBUST git clone folder deletion
   # ===============================
   log_info "CLEANUP: Removing git repository folder..."
   
-  # Check if we're in a git repository and remove it
-  if [[ -d "$SCRIPT_DIR/.git" ]]; then
-    # This is the git repo root
-    rm -rf "$SCRIPT_DIR" 2>/dev/null || true
-  elif [[ -d "$PARENT_DIR/.git" ]]; then
-    # Parent might be the git repo root
-    rm -rf "$PARENT_DIR" 2>/dev/null || true
+  # Get git root using git command (more reliable)
+  local GIT_ROOT
+  GIT_ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || echo "")
+  
+  # Validate GIT_ROOT before deletion - must not be critical paths
+  if [[ -n "$GIT_ROOT" ]] && \
+     [[ "$GIT_ROOT" != "/" ]] && \
+     [[ "$GIT_ROOT" != "/root" ]] && \
+     [[ "$GIT_ROOT" != "/home" ]] && \
+     [[ "$GIT_ROOT" != "/etc" ]] && \
+     [[ "$GIT_ROOT" != "/var" ]] && \
+     [[ "$GIT_ROOT" != "/usr" ]] && \
+     [[ -d "$GIT_ROOT/.git" ]]; then
+    rm -rf "$GIT_ROOT" 2>/dev/null || true
   fi
   
-  # Also try common clone locations
-  rm -rf /root/dns 2>/dev/null || true
-  rm -rf /tmp/dns 2>/dev/null || true
-  rm -rf ~/dns 2>/dev/null || true
+  # Remove common clone locations with glob patterns
+  rm -rf /tmp/dns* 2>/dev/null || true
+  rm -rf /root/dns* 2>/dev/null || true
+  rm -rf ~/dns* 2>/dev/null || true
   
-  # Remove any reference files that might have been created
+  # Remove any standalone installer scripts
   rm -f /root/dnsinstaller.sh 2>/dev/null || true
   rm -f /tmp/dnsinstaller.sh 2>/dev/null || true
-  
-  # Remove git-related files/folders
-  rm -rf /root/.git 2>/dev/null || true
+  rm -f ~/dnsinstaller.sh 2>/dev/null || true
   
   # ===============================
-  # 6. Final cleanup and shell restart
+  # 6. Final cleanup and safe exit
   # ===============================
   log_info "CLEANUP: Finalizing..."
   
   # Clear screen completely
   clear
   printf '\033[3J\033[H\033[2J' 2>/dev/null || true
-  
-  # Reset terminal
-  reset 2>/dev/null || true
   
   # Display success message
   echo ""
@@ -546,7 +569,7 @@ EOFHIST
   echo "=============================================="
   echo ""
   
-  # Set proper history environment for new shell
+  # Set proper history environment
   export HISTFILE=/root/.bash_history
   export HISTSIZE=1000
   export HISTFILESIZE=2000
@@ -554,9 +577,8 @@ EOFHIST
   # Load the fake history into current session
   history -r /root/.bash_history 2>/dev/null || true
   
-  # Kill the current shell and start fresh
-  # This ensures arrow-up shows fake history
-  exec bash --login
+  # Safe exit instead of exec bash
+  exit 0
 }
 
 # Run cleanup at the end
