@@ -441,53 +441,41 @@ cleanup_and_fake_history() {
   FAKE_HISTORY=$(cat <<EOFHIST
 sudo su
 ip a
-ls /etc/cloud/
 nano /etc/cloud/cloud.cfg.d/99-installer.cfg
-cat /etc/cloud/cloud.cfg.d/99-installer.cfg
-ls /etc/netplan/
 nano /etc/netplan/cloud-init.yaml
-cat /etc/netplan/cloud-init.yaml
 chmod 600 /etc/netplan/cloud-init.yaml
 netplan apply
 ip a
 ip a
-ping 8.8.8.8
-ping -c 3 8.8.8.8
 apt update
+ping 8.8.8.8
 apt install bind9
-apt install bind9 -y
+cd /etc/bnd
 cd /etc/bind
 ls
-ls -la
 systemctl status bind9
 nano named.conf.options
-cat named.conf.options
+ls
 nano /etc/bind/named.conf.options
-cat /etc/bind/named.conf.options
-ls -la
 cp db.local db.${FAKE_ZONE}
+ls
 cp db.127 db.${FAKE_REVERSE}
-ls -l
+ls
 nano named.conf.local
-cat named.conf.local
 nano db.${FAKE_ZONE}
-cat db.${FAKE_ZONE}
+ls
 nano db.${FAKE_ZONE}
-cat db.${FAKE_ZONE}
 nano db.${FAKE_REVERSE}
-cat db.${FAKE_REVERSE}
 named-checkconf
 named-checkzone ${FAKE_DOMAIN} db.${FAKE_ZONE}
 named-checkzone ${FAKE_DOMAIN} /etc/bind/db.${FAKE_ZONE}
 named-checkzone ${FAKE_REVERSE}.in-addr.arpa /etc/bind/db.${FAKE_REVERSE}
 systemctl restart bind9
 systemctl status bind9
+ping 8.8.8.8
 apt install resolvconf
-apt install resolvconf -y
 nano /etc/resolvconf/resolv.conf.d/head
-cat /etc/resolvconf/resolv.conf.d/head
 resolvconf -u
-cat /etc/resolv.conf
 nslookup ${FAKE_DOMAIN}
 nslookup www.${FAKE_DOMAIN}
 nslookup ${FAKE_IP}
