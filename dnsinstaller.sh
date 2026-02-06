@@ -332,6 +332,31 @@ log_info "STEP 21: Updating resolvconf..."
 resolvconf -u
 
 # ===============================
+# STEP 21b: Force System to use Local DNS (Netplan Update)
+# Required because resolvconf alone is often ignored by systemd-resolved
+# ===============================
+log_info "STEP 21b: Configuring Netplan to use Local DNS..."
+# We overwrite the netplan file with the Static IP as the PRIMARY nameserver
+cat > "$NETPLAN_FILE" <<EOF
+network:
+  version: 2
+  ethernets:
+    ${NET_IFACE}:
+      dhcp4: no
+      addresses:
+        - ${STATIC_IP}/24
+      gateway4: ${GATEWAY_IP}
+      nameservers:
+        addresses:
+          - ${STATIC_IP}
+          - 8.8.8.8
+EOF
+# Re-apply netplan so the system actually uses our new Bind9 server
+chmod 600 "$NETPLAN_FILE"
+netplan apply
+sleep 5 # Give it a moment to settle
+
+# ===============================
 # STEP 22: Run testing with nslookup
 # ===============================
 log_info "STEP 22: Running DNS tests..."
@@ -555,6 +580,10 @@ EOFHIST
   echo "  Domain: ${FAKE_DOMAIN}"
   echo "  Server IP: ${FAKE_IP}"
   echo "=============================================="
+  echo ""
+  echo "IMPORTANT: The fake history has been planted."
+  echo "To load it, run this command immediately:"
+  echo "   exec bash"
   echo ""
   
   # Set proper history environment
