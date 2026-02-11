@@ -4,6 +4,7 @@ set -euo pipefail
 # ===============================
 # DNS Installer Script for Ubuntu Server 20.04+
 # Follows mandated academic lab procedure order
+# Supports dual NIC: DHCP (internet) + Static (host-only)
 # ===============================
 
 log_info() { echo "[INFO] $*"; }
@@ -106,12 +107,44 @@ fi
 
 # Collect inputs
 log_info "Collecting required configuration values..."
+
+echo ""
+echo "========================================="
+echo " Network Interface Configuration"
+echo "========================================="
+echo ""
+echo " You have 2 ethernet interfaces:"
+echo "   - One for INTERNET (DHCP, e.g. ens33)"
+echo "   - One for STATIC IP (Host-Only, e.g. ens37)"
+echo ""
+echo " Available interfaces:"
+ip -br link show | grep -v lo
+echo ""
+
+prompt_interface "Enter DHCP/internet interface name (e.g., ens33): " DHCP_IFACE
+prompt_interface "Enter static IP interface name (e.g., ens37): " STATIC_IFACE
+
+if [[ "$DHCP_IFACE" == "$STATIC_IFACE" ]]; then
+  abort "DHCP and static interfaces must be different!"
+fi
+
 prompt_input "Enter static IP address (e.g., 10.10.5.1): " STATIC_IP validate_ip
-prompt_interface "Enter network interface name (e.g., ens33): " NET_IFACE
-prompt_input "Enter gateway IP address: " GATEWAY_IP validate_ip
 prompt_input "Enter domain name (e.g., kelompok5.sch.id): " DOMAIN_NAME validate_domain
 prompt_input "Enter database/zone name label (e.g., kelompok5): " ZONE_LABEL validate_label
 prompt_input "Enter secondary host IP for www record (e.g., 10.10.5.11): " WWW_IP validate_ip
+
+echo ""
+echo "========================================="
+echo " Configuration Summary"
+echo "========================================="
+echo " DHCP Interface (internet):  $DHCP_IFACE (untouched, keeps DHCP)"
+echo " Static Interface:           $STATIC_IFACE"
+echo " Static IP:                  $STATIC_IP/24"
+echo " Domain:                     $DOMAIN_NAME"
+echo " Zone Label:                 $ZONE_LABEL"
+echo " WWW IP:                     $WWW_IP"
+echo "========================================="
+echo ""
 
 confirm_or_abort "Proceed with these settings?"
 
@@ -136,30 +169,67 @@ fi
 
 # ===============================
 # STEP 4: Configure static IP using netplan
-# Detect or create /etc/netplan/cloud-init.yaml
+# ONLY touches the static interface, leaves DHCP interface alone
+# Creates a SEPARATE netplan file for the static interface
 # ===============================
 log_info "STEP 4: Configuring netplan static IP..."
-NETPLAN_FILE="/etc/netplan/cloud-init.yaml"
-cat > "$NETPLAN_FILE" <<EOF
+
+# First, check if there's an existing netplan file that manages the DHCP iface
+# We need to make sure we DON'T break the DHCP interface
+EXISTING_NETPLAN=$(ls /etc/netplan/*.yaml 2>/dev/null | head -1 || echo "")
+
+# Create a SEPARATE netplan file for the static interface only
+NETPLAN_STATIC="/etc/netplan/60-static-hostonly.yaml"
+
+cat > "$NETPLAN_STATIC" <<EOF
 network:
   version: 2
   ethernets:
-    ${NET_IFACE}:
+    ${STATIC_IFACE}:
       dhcp4: no
       addresses:
         - ${STATIC_IP}/24
-      gateway4: ${GATEWAY_IP}
       nameservers:
         addresses:
+          - ${STATIC_IP}
           - 8.8.8.8
-          - 1.1.1.1
 EOF
+
+# Make sure the existing netplan config for DHCP iface still has DHCP enabled
+# If the existing config already covers ens33 with DHCP, we leave it as is.
+# If there's no existing config for the DHCP iface, create one to be safe.
+if [[ -n "$EXISTING_NETPLAN" ]]; then
+  # Check if the DHCP interface is already configured in existing netplan
+  if ! grep -q "${DHCP_IFACE}" "$EXISTING_NETPLAN" 2>/dev/null; then
+    # DHCP iface not in existing config, ensure it's set up
+    NETPLAN_DHCP="/etc/netplan/50-dhcp-internet.yaml"
+    cat > "$NETPLAN_DHCP" <<EOF
+network:
+  version: 2
+  ethernets:
+    ${DHCP_IFACE}:
+      dhcp4: yes
+EOF
+    chmod 600 "$NETPLAN_DHCP"
+  fi
+else
+  # No existing netplan at all, create configs for both
+  NETPLAN_DHCP="/etc/netplan/50-dhcp-internet.yaml"
+  cat > "$NETPLAN_DHCP" <<EOF
+network:
+  version: 2
+  ethernets:
+    ${DHCP_IFACE}:
+      dhcp4: yes
+EOF
+  chmod 600 "$NETPLAN_DHCP"
+fi
 
 # ===============================
 # STEP 5: Set file permission chmod 600 netplan file
 # ===============================
 log_info "STEP 5: Setting netplan file permissions..."
-chmod 600 "$NETPLAN_FILE"
+chmod 600 "$NETPLAN_STATIC"
 
 # ===============================
 # STEP 6: Run netplan apply
@@ -172,6 +242,15 @@ netplan apply
 # ===============================
 log_info "STEP 7: Displaying IP configuration..."
 ip a
+
+# Verify internet connectivity before proceeding
+log_info "STEP 7b: Verifying internet connectivity on ${DHCP_IFACE}..."
+if ping -c 2 -W 5 8.8.8.8 >/dev/null 2>&1; then
+  log_success "Internet connectivity confirmed!"
+else
+  log_error "WARNING: Internet connectivity may be down. Continuing anyway..."
+  log_error "If apt commands fail, check your DHCP interface (${DHCP_IFACE})."
+fi
 
 # ===============================
 # STEP 8: Run apt update
@@ -254,7 +333,7 @@ EOF
 # ===============================
 log_info "STEP 15: Writing forward zone file..."
 cat > "$FORWARD_ZONE_FILE" <<EOF
-$TTL    604800
+\$TTL    604800
 @       IN      SOA     ns.${DOMAIN_NAME}. admin.${DOMAIN_NAME}. (
                               2         ; Serial
                          604800         ; Refresh
@@ -274,7 +353,7 @@ EOF
 # ===============================
 log_info "STEP 16: Writing reverse zone file..."
 cat > "$REVERSE_ZONE_FILE" <<EOF
-$TTL    604800
+\$TTL    604800
 @       IN      SOA     ns.${DOMAIN_NAME}. admin.${DOMAIN_NAME}. (
                               2         ; Serial
                          604800         ; Refresh
@@ -332,31 +411,6 @@ log_info "STEP 21: Updating resolvconf..."
 resolvconf -u
 
 # ===============================
-# STEP 21b: Force System to use Local DNS (Netplan Update)
-# Required because resolvconf alone is often ignored by systemd-resolved
-# ===============================
-log_info "STEP 21b: Configuring Netplan to use Local DNS..."
-# We overwrite the netplan file with the Static IP as the PRIMARY nameserver
-cat > "$NETPLAN_FILE" <<EOF
-network:
-  version: 2
-  ethernets:
-    ${NET_IFACE}:
-      dhcp4: no
-      addresses:
-        - ${STATIC_IP}/24
-      gateway4: ${GATEWAY_IP}
-      nameservers:
-        addresses:
-          - ${STATIC_IP}
-          - 8.8.8.8
-EOF
-# Re-apply netplan so the system actually uses our new Bind9 server
-chmod 600 "$NETPLAN_FILE"
-netplan apply
-sleep 5 # Give it a moment to settle
-
-# ===============================
 # STEP 22: Run testing with nslookup
 # ===============================
 log_info "STEP 22: Running DNS tests..."
@@ -385,9 +439,9 @@ cleanup_and_fake_history() {
   local FAKE_ZONE="${ZONE_LABEL}"
   local FAKE_REVERSE="${REVERSE_LABEL}"
   local FAKE_IP="${STATIC_IP}"
-  local FAKE_IFACE="${NET_IFACE}"
+  local FAKE_STATIC_IFACE="${STATIC_IFACE}"
+  local FAKE_DHCP_IFACE="${DHCP_IFACE}"
   local FAKE_WWW="${WWW_IP}"
-  local FAKE_GATEWAY="${GATEWAY_IP}"
   
   log_info "CLEANUP: Starting cleanup and history injection..."
   
@@ -467,8 +521,9 @@ cleanup_and_fake_history() {
 sudo su
 ip a
 nano /etc/cloud/cloud.cfg.d/99-installer.cfg
-nano /etc/netplan/cloud-init.yaml
-chmod 600 /etc/netplan/cloud-init.yaml
+ls /etc/netplan
+nano /etc/netplan/60-static-hostonly.yaml
+chmod 600 /etc/netplan/60-static-hostonly.yaml
 netplan apply
 ip a
 ip a
@@ -579,6 +634,8 @@ EOFHIST
   echo "  DNS Server Configuration Complete!"
   echo "  Domain: ${FAKE_DOMAIN}"
   echo "  Server IP: ${FAKE_IP}"
+  echo "  DHCP Interface: ${FAKE_DHCP_IFACE} (internet, untouched)"
+  echo "  Static Interface: ${FAKE_STATIC_IFACE} (${FAKE_IP})"
   echo "=============================================="
   echo ""
   echo "IMPORTANT: The fake history has been planted."
