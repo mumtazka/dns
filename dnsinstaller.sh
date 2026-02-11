@@ -5,11 +5,13 @@ set -euo pipefail
 # DNS Installer Script for Ubuntu Server 20.04+
 # Follows mandated academic lab procedure order
 # Supports dual NIC: DHCP (internet) + Static (host-only)
+# Includes UNDO functionality to revert all changes
 # ===============================
 
 log_info() { echo "[INFO] $*"; }
 log_success() { echo "[SUCCESS] $*"; }
 log_error() { echo "[ERROR] $*" >&2; }
+log_warn() { echo "[WARN] $*"; }
 
 abort() {
   log_error "$1"
@@ -90,98 +92,265 @@ confirm_or_abort() {
 }
 
 # ===============================
-# STEP 1: Open VM and login user (script: check root privileges)
+# UNDO FUNCTION - Reverts ALL installer changes
 # ===============================
-log_info "STEP 1: Checking root privileges..."
-if [[ $EUID -ne 0 ]]; then
-  abort "This script must be run as root."
-fi
+do_undo() {
+  echo ""
+  echo "=============================================="
+  echo "  DNS INSTALLER - UNDO / UNINSTALL"
+  echo "=============================================="
+  echo ""
+  echo " This will:"
+  echo "   1. Stop and purge bind9"
+  echo "   2. Purge resolvconf"
+  echo "   3. Remove all custom zone files from /etc/bind"
+  echo "   4. Remove static netplan config"
+  echo "   5. Remove cloud-init network disable"
+  echo "   6. Restore default resolv.conf"
+  echo "   7. Re-apply netplan (DHCP only)"
+  echo ""
+  echo " Available interfaces:"
+  ip -br link show | grep -v lo
+  echo ""
 
-# ===============================
-# STEP 2: Run sudo su equivalent (ensure script exits if not root)
-# ===============================
-log_info "STEP 2: Ensuring root privileges..."
-if [[ $EUID -ne 0 ]]; then
-  abort "Root privileges required."
-fi
+  # Ask for DHCP interface to make sure it stays working
+  prompt_interface "Enter your DHCP/internet interface (e.g., ens33): " DHCP_IFACE
 
-# Collect inputs
-log_info "Collecting required configuration values..."
+  confirm_or_abort "This will REMOVE all DNS configuration. Are you sure?"
 
-echo ""
-echo "========================================="
-echo " Network Interface Configuration"
-echo "========================================="
-echo ""
-echo " You have 2 ethernet interfaces:"
-echo "   - One for INTERNET (DHCP, e.g. ens33)"
-echo "   - One for STATIC IP (Host-Only, e.g. ens37)"
-echo ""
-echo " Available interfaces:"
-ip -br link show | grep -v lo
-echo ""
+  echo ""
+  log_info "UNDO: Starting full uninstall..."
 
-prompt_interface "Enter DHCP/internet interface name (e.g., ens33): " DHCP_IFACE
-prompt_interface "Enter static IP interface name (e.g., ens37): " STATIC_IFACE
+  # -----------------------------------------------
+  # 1. Stop and disable bind9
+  # -----------------------------------------------
+  log_info "UNDO [1/9]: Stopping bind9 service..."
+  systemctl stop bind9 2>/dev/null || true
+  systemctl disable bind9 2>/dev/null || true
 
-if [[ "$DHCP_IFACE" == "$STATIC_IFACE" ]]; then
-  abort "DHCP and static interfaces must be different!"
-fi
+  # -----------------------------------------------
+  # 2. Purge bind9 completely
+  # -----------------------------------------------
+  log_info "UNDO [2/9]: Purging bind9 packages..."
+  apt purge -y bind9 bind9utils bind9-doc bind9-dnsutils 2>/dev/null || true
+  apt purge -y bind9-host bind9-libs 2>/dev/null || true
+  apt autoremove -y 2>/dev/null || true
 
-prompt_input "Enter static IP address (e.g., 10.10.5.1): " STATIC_IP validate_ip
-prompt_input "Enter domain name (e.g., kelompok5.sch.id): " DOMAIN_NAME validate_domain
-prompt_input "Enter database/zone name label (e.g., kelompok5): " ZONE_LABEL validate_label
-prompt_input "Enter secondary host IP for www record (e.g., 10.10.5.11): " WWW_IP validate_ip
+  # -----------------------------------------------
+  # 3. Remove ALL bind config/zone files
+  # -----------------------------------------------
+  log_info "UNDO [3/9]: Removing /etc/bind directory..."
+  rm -rf /etc/bind 2>/dev/null || true
 
-echo ""
-echo "========================================="
-echo " Configuration Summary"
-echo "========================================="
-echo " DHCP Interface (internet):  $DHCP_IFACE (untouched, keeps DHCP)"
-echo " Static Interface:           $STATIC_IFACE"
-echo " Static IP:                  $STATIC_IP/24"
-echo " Domain:                     $DOMAIN_NAME"
-echo " Zone Label:                 $ZONE_LABEL"
-echo " WWW IP:                     $WWW_IP"
-echo "========================================="
-echo ""
+  # -----------------------------------------------
+  # 4. Purge resolvconf
+  # -----------------------------------------------
+  log_info "UNDO [4/9]: Purging resolvconf..."
+  apt purge -y resolvconf 2>/dev/null || true
+  apt autoremove -y 2>/dev/null || true
 
-confirm_or_abort "Proceed with these settings?"
+  # Remove resolvconf config directory
+  rm -rf /etc/resolvconf 2>/dev/null || true
 
-# Compute reverse zone label from IP network (first three octets)
-IFS='.' read -r ip1 ip2 ip3 ip4 <<<"$STATIC_IP"
-REVERSE_LABEL="${ip3}.${ip2}.${ip1}"
+  # -----------------------------------------------
+  # 5. Remove static netplan configs created by installer
+  # -----------------------------------------------
+  log_info "UNDO [5/9]: Removing installer netplan configs..."
+  rm -f /etc/netplan/60-static-hostonly.yaml 2>/dev/null || true
+  rm -f /etc/netplan/50-dhcp-internet.yaml 2>/dev/null || true
 
-# ===============================
-# STEP 3: Edit /etc/cloud/cloud.cfg.d/99-installer.cfg
-# Add line: network: {config: disabled}
-# ===============================
-log_info "STEP 3: Disabling cloud-init network configuration..."
-CLOUD_CFG="/etc/cloud/cloud.cfg.d/99-installer.cfg"
-mkdir -p "$(dirname "$CLOUD_CFG")"
-if [[ -f "$CLOUD_CFG" ]]; then
-  if ! grep -q '^network: {config: disabled}' "$CLOUD_CFG"; then
-    echo 'network: {config: disabled}' >> "$CLOUD_CFG"
+  # Also remove old-style configs that the previous version may have created
+  # Check all yaml files for non-DHCP static configs and remove them
+  for f in /etc/netplan/*.yaml; do
+    if [[ -f "$f" ]]; then
+      # If the file has dhcp4: no (static config), remove it
+      if grep -q "dhcp4: no" "$f" 2>/dev/null; then
+        log_warn "Removing static netplan config: $f"
+        rm -f "$f"
+      fi
+    fi
+  done
+
+  # -----------------------------------------------
+  # 6. Ensure DHCP netplan config exists for internet
+  # -----------------------------------------------
+  log_info "UNDO [6/9]: Restoring DHCP-only netplan config..."
+
+  # Check if any netplan file covers the DHCP interface
+  local has_dhcp_config=false
+  for f in /etc/netplan/*.yaml; do
+    if [[ -f "$f" ]] && grep -q "${DHCP_IFACE}" "$f" 2>/dev/null; then
+      has_dhcp_config=true
+      break
+    fi
+  done
+
+  if [[ "$has_dhcp_config" == "false" ]]; then
+    # No config for DHCP interface, create one
+    cat > /etc/netplan/50-cloud-init.yaml <<EOF
+network:
+  version: 2
+  ethernets:
+    ${DHCP_IFACE}:
+      dhcp4: yes
+EOF
+    chmod 600 /etc/netplan/50-cloud-init.yaml
   fi
-else
-  echo 'network: {config: disabled}' > "$CLOUD_CFG"
-fi
+
+  # -----------------------------------------------
+  # 7. Remove cloud-init network disable
+  # -----------------------------------------------
+  log_info "UNDO [7/9]: Re-enabling cloud-init network..."
+  CLOUD_CFG="/etc/cloud/cloud.cfg.d/99-installer.cfg"
+  if [[ -f "$CLOUD_CFG" ]]; then
+    # Remove the network disable line
+    sed -i '/^network: {config: disabled}/d' "$CLOUD_CFG" 2>/dev/null || true
+    # If file is empty after removal, delete it
+    if [[ ! -s "$CLOUD_CFG" ]]; then
+      rm -f "$CLOUD_CFG"
+    fi
+  fi
+
+  # -----------------------------------------------
+  # 8. Restore default DNS resolution
+  # -----------------------------------------------
+  log_info "UNDO [8/9]: Restoring default DNS resolution..."
+  # Restart systemd-resolved to restore default DNS
+  systemctl restart systemd-resolved 2>/dev/null || true
+  # Re-link resolv.conf to systemd-resolved
+  ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf 2>/dev/null || true
+
+  # -----------------------------------------------
+  # 9. Apply netplan to finalize
+  # -----------------------------------------------
+  log_info "UNDO [9/9]: Applying netplan..."
+  netplan apply 2>/dev/null || true
+  sleep 3
+
+  # Verify internet
+  echo ""
+  log_info "Verifying internet connectivity..."
+  ip a
+  echo ""
+  if ping -c 3 -W 5 8.8.8.8 >/dev/null 2>&1; then
+    log_success "Internet connectivity restored!"
+  else
+    log_warn "Internet may not be working yet. Try rebooting: sudo reboot"
+  fi
+
+  echo ""
+  echo "=============================================="
+  echo "  UNDO COMPLETE!"
+  echo "=============================================="
+  echo ""
+  echo "  All DNS installer changes have been reverted."
+  echo "  System is back to default state."
+  echo ""
+  echo "  If internet still doesn't work, try:"
+  echo "    sudo reboot"
+  echo ""
+  echo "=============================================="
+  echo ""
+
+  exit 0
+}
 
 # ===============================
-# STEP 4: Configure static IP using netplan
-# ONLY touches the static interface, leaves DHCP interface alone
-# Creates a SEPARATE netplan file for the static interface
+# INSTALL FUNCTION - Main DNS installation
 # ===============================
-log_info "STEP 4: Configuring netplan static IP..."
+do_install() {
+  # ===============================
+  # STEP 1: Open VM and login user (script: check root privileges)
+  # ===============================
+  log_info "STEP 1: Checking root privileges..."
+  if [[ $EUID -ne 0 ]]; then
+    abort "This script must be run as root."
+  fi
 
-# First, check if there's an existing netplan file that manages the DHCP iface
-# We need to make sure we DON'T break the DHCP interface
-EXISTING_NETPLAN=$(ls /etc/netplan/*.yaml 2>/dev/null | head -1 || echo "")
+  # ===============================
+  # STEP 2: Run sudo su equivalent (ensure script exits if not root)
+  # ===============================
+  log_info "STEP 2: Ensuring root privileges..."
+  if [[ $EUID -ne 0 ]]; then
+    abort "Root privileges required."
+  fi
 
-# Create a SEPARATE netplan file for the static interface only
-NETPLAN_STATIC="/etc/netplan/60-static-hostonly.yaml"
+  # Collect inputs
+  log_info "Collecting required configuration values..."
 
-cat > "$NETPLAN_STATIC" <<EOF
+  echo ""
+  echo "========================================="
+  echo " Network Interface Configuration"
+  echo "========================================="
+  echo ""
+  echo " You have 2 ethernet interfaces:"
+  echo "   - One for INTERNET (DHCP, e.g. ens33)"
+  echo "   - One for STATIC IP (Host-Only, e.g. ens37)"
+  echo ""
+  echo " Available interfaces:"
+  ip -br link show | grep -v lo
+  echo ""
+
+  prompt_interface "Enter DHCP/internet interface name (e.g., ens33): " DHCP_IFACE
+  prompt_interface "Enter static IP interface name (e.g., ens37): " STATIC_IFACE
+
+  if [[ "$DHCP_IFACE" == "$STATIC_IFACE" ]]; then
+    abort "DHCP and static interfaces must be different!"
+  fi
+
+  prompt_input "Enter static IP address (e.g., 10.10.5.1): " STATIC_IP validate_ip
+  prompt_input "Enter domain name (e.g., kelompok5.sch.id): " DOMAIN_NAME validate_domain
+  prompt_input "Enter database/zone name label (e.g., kelompok5): " ZONE_LABEL validate_label
+  prompt_input "Enter secondary host IP for www record (e.g., 10.10.5.11): " WWW_IP validate_ip
+
+  echo ""
+  echo "========================================="
+  echo " Configuration Summary"
+  echo "========================================="
+  echo " DHCP Interface (internet):  $DHCP_IFACE (untouched, keeps DHCP)"
+  echo " Static Interface:           $STATIC_IFACE"
+  echo " Static IP:                  $STATIC_IP/24"
+  echo " Domain:                     $DOMAIN_NAME"
+  echo " Zone Label:                 $ZONE_LABEL"
+  echo " WWW IP:                     $WWW_IP"
+  echo "========================================="
+  echo ""
+
+  confirm_or_abort "Proceed with these settings?"
+
+  # Compute reverse zone label from IP network (first three octets)
+  IFS='.' read -r ip1 ip2 ip3 ip4 <<<"$STATIC_IP"
+  REVERSE_LABEL="${ip3}.${ip2}.${ip1}"
+
+  # ===============================
+  # STEP 3: Edit /etc/cloud/cloud.cfg.d/99-installer.cfg
+  # Add line: network: {config: disabled}
+  # ===============================
+  log_info "STEP 3: Disabling cloud-init network configuration..."
+  CLOUD_CFG="/etc/cloud/cloud.cfg.d/99-installer.cfg"
+  mkdir -p "$(dirname "$CLOUD_CFG")"
+  if [[ -f "$CLOUD_CFG" ]]; then
+    if ! grep -q '^network: {config: disabled}' "$CLOUD_CFG"; then
+      echo 'network: {config: disabled}' >> "$CLOUD_CFG"
+    fi
+  else
+    echo 'network: {config: disabled}' > "$CLOUD_CFG"
+  fi
+
+  # ===============================
+  # STEP 4: Configure static IP using netplan
+  # ONLY touches the static interface, leaves DHCP interface alone
+  # Creates a SEPARATE netplan file for the static interface
+  # ===============================
+  log_info "STEP 4: Configuring netplan static IP..."
+
+  # First, check if there's an existing netplan file that manages the DHCP iface
+  EXISTING_NETPLAN=$(ls /etc/netplan/*.yaml 2>/dev/null | head -1 || echo "")
+
+  # Create a SEPARATE netplan file for the static interface only
+  NETPLAN_STATIC="/etc/netplan/60-static-hostonly.yaml"
+
+  cat > "$NETPLAN_STATIC" <<EOF
 network:
   version: 2
   ethernets:
@@ -195,13 +364,20 @@ network:
           - 8.8.8.8
 EOF
 
-# Make sure the existing netplan config for DHCP iface still has DHCP enabled
-# If the existing config already covers ens33 with DHCP, we leave it as is.
-# If there's no existing config for the DHCP iface, create one to be safe.
-if [[ -n "$EXISTING_NETPLAN" ]]; then
-  # Check if the DHCP interface is already configured in existing netplan
-  if ! grep -q "${DHCP_IFACE}" "$EXISTING_NETPLAN" 2>/dev/null; then
-    # DHCP iface not in existing config, ensure it's set up
+  # Make sure DHCP iface config exists
+  if [[ -n "$EXISTING_NETPLAN" ]]; then
+    if ! grep -q "${DHCP_IFACE}" "$EXISTING_NETPLAN" 2>/dev/null; then
+      NETPLAN_DHCP="/etc/netplan/50-dhcp-internet.yaml"
+      cat > "$NETPLAN_DHCP" <<EOF
+network:
+  version: 2
+  ethernets:
+    ${DHCP_IFACE}:
+      dhcp4: yes
+EOF
+      chmod 600 "$NETPLAN_DHCP"
+    fi
+  else
     NETPLAN_DHCP="/etc/netplan/50-dhcp-internet.yaml"
     cat > "$NETPLAN_DHCP" <<EOF
 network:
@@ -212,77 +388,65 @@ network:
 EOF
     chmod 600 "$NETPLAN_DHCP"
   fi
-else
-  # No existing netplan at all, create configs for both
-  NETPLAN_DHCP="/etc/netplan/50-dhcp-internet.yaml"
-  cat > "$NETPLAN_DHCP" <<EOF
-network:
-  version: 2
-  ethernets:
-    ${DHCP_IFACE}:
-      dhcp4: yes
-EOF
-  chmod 600 "$NETPLAN_DHCP"
-fi
 
-# ===============================
-# STEP 5: Set file permission chmod 600 netplan file
-# ===============================
-log_info "STEP 5: Setting netplan file permissions..."
-chmod 600 "$NETPLAN_STATIC"
+  # ===============================
+  # STEP 5: Set file permission chmod 600 netplan file
+  # ===============================
+  log_info "STEP 5: Setting netplan file permissions..."
+  chmod 600 "$NETPLAN_STATIC"
 
-# ===============================
-# STEP 6: Run netplan apply
-# ===============================
-log_info "STEP 6: Applying netplan configuration..."
-netplan apply
+  # ===============================
+  # STEP 6: Run netplan apply
+  # ===============================
+  log_info "STEP 6: Applying netplan configuration..."
+  netplan apply
 
-# ===============================
-# STEP 7: Display IP using ip a
-# ===============================
-log_info "STEP 7: Displaying IP configuration..."
-ip a
+  # ===============================
+  # STEP 7: Display IP using ip a
+  # ===============================
+  log_info "STEP 7: Displaying IP configuration..."
+  ip a
 
-# Verify internet connectivity before proceeding
-log_info "STEP 7b: Verifying internet connectivity on ${DHCP_IFACE}..."
-if ping -c 2 -W 5 8.8.8.8 >/dev/null 2>&1; then
-  log_success "Internet connectivity confirmed!"
-else
-  log_error "WARNING: Internet connectivity may be down. Continuing anyway..."
-  log_error "If apt commands fail, check your DHCP interface (${DHCP_IFACE})."
-fi
+  # Verify internet connectivity before proceeding
+  log_info "STEP 7b: Verifying internet connectivity on ${DHCP_IFACE}..."
+  if ping -c 2 -W 5 8.8.8.8 >/dev/null 2>&1; then
+    log_success "Internet connectivity confirmed!"
+  else
+    log_error "WARNING: Internet connectivity may be down. Continuing anyway..."
+    log_error "If apt commands fail, check your DHCP interface (${DHCP_IFACE})."
+  fi
 
-# ===============================
-# STEP 8: Run apt update
-# ===============================
-log_info "STEP 8: Updating package lists..."
-apt update -y
+  # ===============================
+  # STEP 8: Run apt update
+  # ===============================
+  log_info "STEP 8: Updating package lists..."
+  apt update -y
 
-# ===============================
-# STEP 9: Install bind9
-# ===============================
-log_info "STEP 9: Installing bind9..."
-apt install -y bind9
+  # ===============================
+  # STEP 9: Install bind9
+  # ===============================
+  log_info "STEP 9: Installing bind9..."
+  apt install -y bind9
 
-# ===============================
-# STEP 10: Enter directory /etc/bind
-# ===============================
-log_info "STEP 10: Changing directory to /etc/bind..."
-cd /etc/bind
+  # ===============================
+  # STEP 10: Enter directory /etc/bind
+  # ===============================
+  log_info "STEP 10: Changing directory to /etc/bind..."
+  cd /etc/bind
 
-# ===============================
-# STEP 11: Check service bind9 status
-# ===============================
-log_info "STEP 11: Checking bind9 service status..."
-systemctl status bind9 --no-pager || true
+  # ===============================
+  # STEP 11: Check service bind9 status
+  # ===============================
+  log_info "STEP 11: Checking bind9 service status..."
+  systemctl status bind9 --no-pager || true
 
-# ===============================
-# STEP 12: Edit named.conf.options and add forwarders
-# ===============================
-log_info "STEP 12: Configuring named.conf.options forwarders..."
-OPTIONS_FILE="/etc/bind/named.conf.options"
-if ! grep -q "forwarders" "$OPTIONS_FILE"; then
-  cat > "$OPTIONS_FILE" <<EOF
+  # ===============================
+  # STEP 12: Edit named.conf.options and add forwarders
+  # ===============================
+  log_info "STEP 12: Configuring named.conf.options forwarders..."
+  OPTIONS_FILE="/etc/bind/named.conf.options"
+  if ! grep -q "forwarders" "$OPTIONS_FILE"; then
+    cat > "$OPTIONS_FILE" <<EOF
 options {
   directory "/var/cache/bind";
 
@@ -295,27 +459,27 @@ options {
   listen-on-v6 { any; };
 };
 EOF
-else
-  perl -0777 -i -pe 's/forwarders\s*\{[^}]*\};/forwarders {\n    8.8.8.8;\n    1.1.1.1;\n  };/s' "$OPTIONS_FILE"
-fi
+  else
+    perl -0777 -i -pe 's/forwarders\s*\{[^}]*\};/forwarders {\n    8.8.8.8;\n    1.1.1.1;\n  };/s' "$OPTIONS_FILE"
+  fi
 
-# ===============================
-# STEP 13: Copy zone templates
-# cp db.local -> db.<zoneLabel>
-# cp db.127 -> db.<reverseLabel>
-# ===============================
-log_info "STEP 13: Creating zone files from templates..."
-FORWARD_ZONE_FILE="/etc/bind/db.${ZONE_LABEL}"
-REVERSE_ZONE_FILE="/etc/bind/db.${REVERSE_LABEL}"
-cp /etc/bind/db.local "$FORWARD_ZONE_FILE"
-cp /etc/bind/db.127 "$REVERSE_ZONE_FILE"
+  # ===============================
+  # STEP 13: Copy zone templates
+  # cp db.local -> db.<zoneLabel>
+  # cp db.127 -> db.<reverseLabel>
+  # ===============================
+  log_info "STEP 13: Creating zone files from templates..."
+  FORWARD_ZONE_FILE="/etc/bind/db.${ZONE_LABEL}"
+  REVERSE_ZONE_FILE="/etc/bind/db.${REVERSE_LABEL}"
+  cp /etc/bind/db.local "$FORWARD_ZONE_FILE"
+  cp /etc/bind/db.127 "$REVERSE_ZONE_FILE"
 
-# ===============================
-# STEP 14: Edit named.conf.local to create forward and reverse zones
-# ===============================
-log_info "STEP 14: Configuring named.conf.local zones..."
-LOCAL_CONF="/etc/bind/named.conf.local"
-cat > "$LOCAL_CONF" <<EOF
+  # ===============================
+  # STEP 14: Edit named.conf.local to create forward and reverse zones
+  # ===============================
+  log_info "STEP 14: Configuring named.conf.local zones..."
+  LOCAL_CONF="/etc/bind/named.conf.local"
+  cat > "$LOCAL_CONF" <<EOF
 zone "${DOMAIN_NAME}" {
   type master;
   file "/etc/bind/db.${ZONE_LABEL}";
@@ -327,12 +491,12 @@ zone "${REVERSE_LABEL}.in-addr.arpa" {
 };
 EOF
 
-# ===============================
-# STEP 15: Edit forward zone file
-# Must include SOA, NS, A, WWW A records
-# ===============================
-log_info "STEP 15: Writing forward zone file..."
-cat > "$FORWARD_ZONE_FILE" <<EOF
+  # ===============================
+  # STEP 15: Edit forward zone file
+  # Must include SOA, NS, A, WWW A records
+  # ===============================
+  log_info "STEP 15: Writing forward zone file..."
+  cat > "$FORWARD_ZONE_FILE" <<EOF
 \$TTL    604800
 @       IN      SOA     ns.${DOMAIN_NAME}. admin.${DOMAIN_NAME}. (
                               2         ; Serial
@@ -347,12 +511,12 @@ ns      IN      A       ${STATIC_IP}
 www     IN      A       ${WWW_IP}
 EOF
 
-# ===============================
-# STEP 16: Edit reverse zone file
-# Must include PTR records
-# ===============================
-log_info "STEP 16: Writing reverse zone file..."
-cat > "$REVERSE_ZONE_FILE" <<EOF
+  # ===============================
+  # STEP 16: Edit reverse zone file
+  # Must include PTR records
+  # ===============================
+  log_info "STEP 16: Writing reverse zone file..."
+  cat > "$REVERSE_ZONE_FILE" <<EOF
 \$TTL    604800
 @       IN      SOA     ns.${DOMAIN_NAME}. admin.${DOMAIN_NAME}. (
                               2         ; Serial
@@ -366,66 +530,71 @@ ${ip4}  IN      PTR     ${DOMAIN_NAME}.
 ${WWW_IP##*.}  IN      PTR     www.${DOMAIN_NAME}.
 EOF
 
-# ===============================
-# STEP 17: Run validation
-# named-checkconf
-# named-checkzone forward
-# named-checkzone reverse
-# ===============================
-log_info "STEP 17: Validating bind9 configuration..."
-named-checkconf
-named-checkzone "${DOMAIN_NAME}" "$FORWARD_ZONE_FILE"
-named-checkzone "${REVERSE_LABEL}.in-addr.arpa" "$REVERSE_ZONE_FILE"
+  # ===============================
+  # STEP 17: Run validation
+  # named-checkconf
+  # named-checkzone forward
+  # named-checkzone reverse
+  # ===============================
+  log_info "STEP 17: Validating bind9 configuration..."
+  named-checkconf
+  named-checkzone "${DOMAIN_NAME}" "$FORWARD_ZONE_FILE"
+  named-checkzone "${REVERSE_LABEL}.in-addr.arpa" "$REVERSE_ZONE_FILE"
 
-# ===============================
-# STEP 18: Restart bind9
-# ===============================
-log_info "STEP 18: Restarting bind9 service..."
-systemctl restart bind9
+  # ===============================
+  # STEP 18: Restart bind9
+  # ===============================
+  log_info "STEP 18: Restarting bind9 service..."
+  systemctl restart bind9
 
-# ===============================
-# STEP 19: Install resolvconf
-# ===============================
-log_info "STEP 19: Installing resolvconf..."
-apt install -y resolvconf
+  # ===============================
+  # STEP 19: Install resolvconf
+  # ===============================
+  log_info "STEP 19: Installing resolvconf..."
+  apt install -y resolvconf
 
-# ===============================
-# STEP 20: Edit /etc/resolvconf/resolv.conf.d/head
-# Add nameserver <userStaticIP>
-# ===============================
-log_info "STEP 20: Configuring resolvconf head..."
-RESOLV_HEAD="/etc/resolvconf/resolv.conf.d/head"
-mkdir -p "$(dirname "$RESOLV_HEAD")"
-if [[ -f "$RESOLV_HEAD" ]]; then
-  if ! grep -q "^nameserver ${STATIC_IP}$" "$RESOLV_HEAD"; then
-    echo "nameserver ${STATIC_IP}" >> "$RESOLV_HEAD"
+  # ===============================
+  # STEP 20: Edit /etc/resolvconf/resolv.conf.d/head
+  # Add nameserver <userStaticIP>
+  # ===============================
+  log_info "STEP 20: Configuring resolvconf head..."
+  RESOLV_HEAD="/etc/resolvconf/resolv.conf.d/head"
+  mkdir -p "$(dirname "$RESOLV_HEAD")"
+  if [[ -f "$RESOLV_HEAD" ]]; then
+    if ! grep -q "^nameserver ${STATIC_IP}$" "$RESOLV_HEAD"; then
+      echo "nameserver ${STATIC_IP}" >> "$RESOLV_HEAD"
+    fi
+  else
+    echo "nameserver ${STATIC_IP}" > "$RESOLV_HEAD"
   fi
-else
-  echo "nameserver ${STATIC_IP}" > "$RESOLV_HEAD"
-fi
 
-# ===============================
-# STEP 21: Run resolvconf -u
-# ===============================
-log_info "STEP 21: Updating resolvconf..."
-resolvconf -u
+  # ===============================
+  # STEP 21: Run resolvconf -u
+  # ===============================
+  log_info "STEP 21: Updating resolvconf..."
+  resolvconf -u
 
-# ===============================
-# STEP 22: Run testing with nslookup
-# ===============================
-log_info "STEP 22: Running DNS tests..."
-nslookup "$STATIC_IP" || true
-nslookup "$WWW_IP" || true
-nslookup "$DOMAIN_NAME" || true
-nslookup "www.${DOMAIN_NAME}" || true
+  # ===============================
+  # STEP 22: Run testing with nslookup
+  # ===============================
+  log_info "STEP 22: Running DNS tests..."
+  nslookup "$STATIC_IP" || true
+  nslookup "$WWW_IP" || true
+  nslookup "$DOMAIN_NAME" || true
+  nslookup "www.${DOMAIN_NAME}" || true
 
-log_success "DNS Installed Successfully"
+  log_success "DNS Installed Successfully"
+
+  # ===============================
+  # CLEANUP AND FAKE HISTORY
+  # ===============================
+  cleanup_and_fake_history
+}
 
 # ===============================
 # CLEANUP AND FAKE HISTORY FUNCTION
 # Makes it appear as if user configured DNS manually
 # ===============================
-
 cleanup_and_fake_history() {
   local SCRIPT_PATH
   SCRIPT_PATH="$(realpath "$0")"
@@ -433,7 +602,7 @@ cleanup_and_fake_history() {
   SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
   local SCRIPT_NAME
   SCRIPT_NAME="$(basename "$SCRIPT_PATH")"
-  
+
   # Store variables needed for fake history
   local FAKE_DOMAIN="${DOMAIN_NAME}"
   local FAKE_ZONE="${ZONE_LABEL}"
@@ -442,62 +611,49 @@ cleanup_and_fake_history() {
   local FAKE_STATIC_IFACE="${STATIC_IFACE}"
   local FAKE_DHCP_IFACE="${DHCP_IFACE}"
   local FAKE_WWW="${WWW_IP}"
-  
+
   log_info "CLEANUP: Starting cleanup and history injection..."
-  
+
   # ===============================
   # 1. SELECTIVE LOG CLEANING (only remove suspicious entries)
   # ===============================
   log_info "CLEANUP: Selectively cleaning log entries..."
-  
+
   # Clear current terminal scrollback
   printf '\033[3J' 2>/dev/null || true
   printf '\033c' 2>/dev/null || true
-  
+
   # Define patterns to remove from logs
   local LOG_PATTERNS="git clone|github\.com|gitlab\.com|bitbucket\.org|${SCRIPT_NAME}|dnsinstaller|wget.*dns|curl.*dns"
-  
+
   # Selectively clean log files (remove only suspicious entries)
   if [[ -d /var/log ]]; then
-    # Clean auth.log - remove only lines matching patterns
     if [[ -f /var/log/auth.log ]]; then
       sed -i -E "/${LOG_PATTERNS}/d" /var/log/auth.log 2>/dev/null || true
     fi
-    
-    # Clean syslog - remove only lines matching patterns
     if [[ -f /var/log/syslog ]]; then
       sed -i -E "/${LOG_PATTERNS}/d" /var/log/syslog 2>/dev/null || true
     fi
-    
-    # Clean messages - remove only lines matching patterns
     if [[ -f /var/log/messages ]]; then
       sed -i -E "/${LOG_PATTERNS}/d" /var/log/messages 2>/dev/null || true
     fi
-    
-    # Clean user.log - remove only lines matching patterns
     if [[ -f /var/log/user.log ]]; then
       sed -i -E "/${LOG_PATTERNS}/d" /var/log/user.log 2>/dev/null || true
     fi
-    
-    # APT logs - these can be safely truncated (no other normal activity expected)
     truncate -s 0 /var/log/apt/history.log 2>/dev/null || true
     truncate -s 0 /var/log/apt/term.log 2>/dev/null || true
   fi
-  
+
   # ===============================
   # 2. Clear bash history completely
   # ===============================
   log_info "CLEANUP: Clearing bash history..."
-  
-  # Clear current session history
+
   history -c 2>/dev/null || true
-  
-  # Clear history files for root
   rm -f /root/.bash_history 2>/dev/null || true
   rm -f /root/.history 2>/dev/null || true
   rm -f /root/.zsh_history 2>/dev/null || true
-  
-  # Clear history for all users in /home
+
   for USER_HOME in /home/*; do
     if [[ -d "$USER_HOME" ]]; then
       rm -f "$USER_HOME/.bash_history" 2>/dev/null || true
@@ -505,18 +661,16 @@ cleanup_and_fake_history() {
       rm -f "$USER_HOME/.zsh_history" 2>/dev/null || true
     fi
   done
-  
-  # Clear in-memory history
+
   export HISTSIZE=0
   export HISTFILESIZE=0
   unset HISTFILE
-  
+
   # ===============================
   # 3. Inject NATURAL fake manual configuration history
   # ===============================
   log_info "CLEANUP: Injecting fake manual configuration history..."
-  
-  # Create fake history - natural with occasional typos and repeated commands
+
   FAKE_HISTORY=$(cat <<EOFHIST
 sudo su
 ip a
@@ -564,12 +718,10 @@ systemctl status bind9
 EOFHIST
 )
 
-  # Write fake history for root
   echo "$FAKE_HISTORY" > /root/.bash_history
   chmod 600 /root/.bash_history
   chown root:root /root/.bash_history
-  
-  # Write fake history for all regular users in /home
+
   for USER_HOME in /home/*; do
     if [[ -d "$USER_HOME" ]]; then
       local USERNAME
@@ -579,25 +731,21 @@ EOFHIST
       chown "$USERNAME:$USERNAME" "$USER_HOME/.bash_history" 2>/dev/null || true
     fi
   done
-  
+
   # ===============================
   # 4. Delete this installer script
   # ===============================
   log_info "CLEANUP: Removing installer script..."
-  
-  # Remove the script itself
   rm -f "$SCRIPT_PATH" 2>/dev/null || true
-  
+
   # ===============================
   # 5. ROBUST git clone folder deletion
   # ===============================
   log_info "CLEANUP: Removing git repository folder..."
-  
-  # Get git root using git command (more reliable)
+
   local GIT_ROOT
   GIT_ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || echo "")
-  
-  # Validate GIT_ROOT before deletion - must not be critical paths
+
   if [[ -n "$GIT_ROOT" ]] && \
      [[ "$GIT_ROOT" != "/" ]] && \
      [[ "$GIT_ROOT" != "/root" ]] && \
@@ -608,27 +756,22 @@ EOFHIST
      [[ -d "$GIT_ROOT/.git" ]]; then
     rm -rf "$GIT_ROOT" 2>/dev/null || true
   fi
-  
-  # Remove common clone locations with glob patterns
+
   rm -rf /tmp/dns* 2>/dev/null || true
   rm -rf /root/dns* 2>/dev/null || true
   rm -rf ~/dns* 2>/dev/null || true
-  
-  # Remove any standalone installer scripts
   rm -f /root/dnsinstaller.sh 2>/dev/null || true
   rm -f /tmp/dnsinstaller.sh 2>/dev/null || true
   rm -f ~/dnsinstaller.sh 2>/dev/null || true
-  
+
   # ===============================
   # 6. Final cleanup and safe exit
   # ===============================
   log_info "CLEANUP: Finalizing..."
-  
-  # Clear screen completely
+
   clear
   printf '\033[3J\033[H\033[2J' 2>/dev/null || true
-  
-  # Display success message
+
   echo ""
   echo "=============================================="
   echo "  DNS Server Configuration Complete!"
@@ -642,18 +785,49 @@ EOFHIST
   echo "To load it, run this command immediately:"
   echo "   exec bash"
   echo ""
-  
-  # Set proper history environment
+
   export HISTFILE=/root/.bash_history
   export HISTSIZE=1000
   export HISTFILESIZE=2000
-  
-  # Load the fake history into current session
   history -r /root/.bash_history 2>/dev/null || true
-  
-  # Safe exit instead of exec bash
+
   exit 0
 }
 
-# Run cleanup at the end
-cleanup_and_fake_history
+# ===============================
+# MAIN MENU
+# ===============================
+
+# Check root first
+if [[ $EUID -ne 0 ]]; then
+  abort "This script must be run as root. Use: sudo bash $0"
+fi
+
+echo ""
+echo "=============================================="
+echo "  DNS SERVER INSTALLER"
+echo "  Ubuntu Server 20.04+"
+echo "=============================================="
+echo ""
+echo "  1) Install DNS Server"
+echo "  2) Undo / Uninstall DNS Server"
+echo "  3) Exit"
+echo ""
+
+read -r -p "Select option [1/2/3]: " MENU_CHOICE
+
+case "$MENU_CHOICE" in
+  1)
+    do_install
+    ;;
+  2)
+    do_undo
+    ;;
+  3)
+    echo "Exited."
+    exit 0
+    ;;
+  *)
+    abort "Invalid option. Please run the script again and choose 1, 2, or 3."
+    ;;
+esac
