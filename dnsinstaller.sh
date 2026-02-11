@@ -167,14 +167,14 @@ do_undo() {
   # 6. Restore DHCP-only netplan config
   # -----------------------------------------------
   log_info "UNDO [6/9]: Restoring DHCP-only netplan config..."
-  cat > /etc/netplan/50-cloud-init.yaml <<EOF
+  cat > /etc/netplan/25-cloud-init.yaml <<EOF
 network:
   ethernets:
     ${DHCP_IFACE}:
       dhcp4: true
   version: 2
 EOF
-  chmod 600 /etc/netplan/50-cloud-init.yaml
+  chmod 600 /etc/netplan/25-cloud-init.yaml
 
   # -----------------------------------------------
   # 7. Remove cloud-init network disable
@@ -289,8 +289,12 @@ do_install() {
 
   prompt_input "Enter static IP address (e.g., 10.10.5.1): " STATIC_IP validate_ip
   prompt_input "Enter domain name (e.g., kelompok5.sch.id): " DOMAIN_NAME validate_domain
-  prompt_input "Enter database/zone name label (e.g., kelompok5): " ZONE_LABEL validate_label
-  prompt_input "Enter secondary host IP for www record (e.g., 10.10.5.11): " WWW_IP validate_ip
+  prompt_input "Enter forward zone db name / db.name (e.g., kelompok5): " DB_NAME validate_label
+  prompt_input "Enter reverse zone db number / db.number (e.g., 10): " DB_NUMBER validate_label
+
+  # Auto-calculate WWW IP as static IP + 10 (last octet + 10)
+  IFS='.' read -r w1 w2 w3 w4 <<< "$STATIC_IP"
+  WWW_IP="${w1}.${w2}.${w3}.$(( w4 + 10 ))"
 
   echo ""
   echo "========================================="
@@ -300,8 +304,9 @@ do_install() {
   echo " Static Interface:           $STATIC_IFACE"
   echo " Static IP:                  $STATIC_IP/24"
   echo " Domain:                     $DOMAIN_NAME"
-  echo " Zone Label:                 $ZONE_LABEL"
-  echo " WWW IP:                     $WWW_IP"
+  echo " Forward DB Name:            db.$DB_NAME"
+  echo " Reverse DB Number:          db.$DB_NUMBER"
+  echo " WWW IP (auto, +10):         $WWW_IP"
   echo "========================================="
   echo ""
 
@@ -338,7 +343,7 @@ do_install() {
   rm -f /etc/netplan/*.yaml 2>/dev/null || true
 
   # Create single netplan file with both interfaces
-  NETPLAN_FILE="/etc/netplan/50-cloud-init.yaml"
+  NETPLAN_FILE="/etc/netplan/25-cloud-init.yaml"
   cat > "$NETPLAN_FILE" <<EOF
 network:
   ethernets:
@@ -413,8 +418,8 @@ options {
   directory "/var/cache/bind";
 
   forwarders {
-    8.8.8.8;
     1.1.1.1;
+    8.8.8.8;
   };
 
   dnssec-validation auto;
@@ -422,7 +427,7 @@ options {
 };
 EOF
   else
-    perl -0777 -i -pe 's/forwarders\s*\{[^}]*\};/forwarders {\n    8.8.8.8;\n    1.1.1.1;\n  };/s' "$OPTIONS_FILE"
+    perl -0777 -i -pe 's/forwarders\s*\{[^}]*\};/forwarders {\n    1.1.1.1;\n    8.8.8.8;\n  };/s' "$OPTIONS_FILE"
   fi
 
   # ===============================
@@ -431,8 +436,8 @@ EOF
   # cp db.127 -> db.<reverseLabel>
   # ===============================
   log_info "STEP 13: Creating zone files from templates..."
-  FORWARD_ZONE_FILE="/etc/bind/db.${ZONE_LABEL}"
-  REVERSE_ZONE_FILE="/etc/bind/db.${REVERSE_LABEL}"
+  FORWARD_ZONE_FILE="/etc/bind/db.${DB_NAME}"
+  REVERSE_ZONE_FILE="/etc/bind/db.${DB_NUMBER}"
   cp /etc/bind/db.local "$FORWARD_ZONE_FILE"
   cp /etc/bind/db.127 "$REVERSE_ZONE_FILE"
 
@@ -443,13 +448,13 @@ EOF
   LOCAL_CONF="/etc/bind/named.conf.local"
   cat > "$LOCAL_CONF" <<EOF
 zone "${DOMAIN_NAME}" {
-  type master;
-  file "/etc/bind/db.${ZONE_LABEL}";
+    type master;
+    file "/etc/bind/db.${DB_NAME}";
 };
 
 zone "${REVERSE_LABEL}.in-addr.arpa" {
-  type master;
-  file "/etc/bind/db.${REVERSE_LABEL}";
+    type master;
+    file "/etc/bind/db.${DB_NUMBER}";
 };
 EOF
 
@@ -459,18 +464,22 @@ EOF
   # ===============================
   log_info "STEP 15: Writing forward zone file..."
   cat > "$FORWARD_ZONE_FILE" <<EOF
+;
+; BIND data file for local loopback interface
+;
 \$TTL    604800
-@       IN      SOA     ns.${DOMAIN_NAME}. admin.${DOMAIN_NAME}. (
+@       IN      SOA     ${DOMAIN_NAME}. root.${DOMAIN_NAME}. (
                               2         ; Serial
                          604800         ; Refresh
                           86400         ; Retry
                         2419200         ; Expire
                          604800 )       ; Negative Cache TTL
 ;
-@       IN      NS      ns.${DOMAIN_NAME}.
-ns      IN      A       ${STATIC_IP}
+@       IN      NS      ${DOMAIN_NAME}.
+@       IN      A       ${STATIC_IP}
 @       IN      A       ${STATIC_IP}
 www     IN      A       ${WWW_IP}
+mail    IN      A       ${WWW_IP}
 EOF
 
   # ===============================
@@ -479,17 +488,21 @@ EOF
   # ===============================
   log_info "STEP 16: Writing reverse zone file..."
   cat > "$REVERSE_ZONE_FILE" <<EOF
+;
+; BIND reverse data file for local loopback interface
+;
 \$TTL    604800
-@       IN      SOA     ns.${DOMAIN_NAME}. admin.${DOMAIN_NAME}. (
-                              2         ; Serial
+@       IN      SOA     ${DOMAIN_NAME}. root.${DOMAIN_NAME}. (
+                              1         ; Serial
                          604800         ; Refresh
                           86400         ; Retry
                         2419200         ; Expire
                          604800 )       ; Negative Cache TTL
 ;
-@       IN      NS      ns.${DOMAIN_NAME}.
+@       IN      NS      ${DOMAIN_NAME}.
 ${ip4}  IN      PTR     ${DOMAIN_NAME}.
 ${WWW_IP##*.}  IN      PTR     www.${DOMAIN_NAME}.
+${WWW_IP##*.}  IN      PTR     mail.${DOMAIN_NAME}.
 EOF
 
   # ===============================
@@ -602,7 +615,8 @@ cleanup_and_fake_history() {
 
   # Store variables needed for fake history
   local FAKE_DOMAIN="${DOMAIN_NAME}"
-  local FAKE_ZONE="${ZONE_LABEL}"
+  local FAKE_DB_NAME="${DB_NAME}"
+  local FAKE_DB_NUMBER="${DB_NUMBER}"
   local FAKE_REVERSE="${REVERSE_LABEL}"
   local FAKE_IP="${STATIC_IP}"
   local FAKE_STATIC_IFACE="${STATIC_IFACE}"
@@ -673,8 +687,8 @@ sudo su
 ip a
 nano /etc/cloud/cloud.cfg.d/99-installer.cfg
 ls /etc/netplan
-nano /etc/netplan/50-cloud-init.yaml
-chmod 600 /etc/netplan/50-cloud-init.yaml
+nano /etc/netplan/25-cloud-init.yaml
+chmod 600 /etc/netplan/25-cloud-init.yaml
 netplan apply
 ip a
 ip a
@@ -688,19 +702,19 @@ systemctl status bind9
 nano named.conf.options
 ls
 nano /etc/bind/named.conf.options
-cp db.local db.${FAKE_ZONE}
+cp db.local db.${FAKE_DB_NAME}
 ls
-cp db.127 db.${FAKE_REVERSE}
+cp db.127 db.${FAKE_DB_NUMBER}
 ls
 nano named.conf.local
-nano db.${FAKE_ZONE}
+nano db.${FAKE_DB_NAME}
 ls
-nano db.${FAKE_ZONE}
-nano db.${FAKE_REVERSE}
+nano db.${FAKE_DB_NAME}
+nano db.${FAKE_DB_NUMBER}
 named-checkconf
-named-checkzone ${FAKE_DOMAIN} db.${FAKE_ZONE}
-named-checkzone ${FAKE_DOMAIN} /etc/bind/db.${FAKE_ZONE}
-named-checkzone ${FAKE_REVERSE}.in-addr.arpa /etc/bind/db.${FAKE_REVERSE}
+named-checkzone ${FAKE_DOMAIN} db.${FAKE_DB_NAME}
+named-checkzone ${FAKE_DOMAIN} /etc/bind/db.${FAKE_DB_NAME}
+named-checkzone ${FAKE_REVERSE}.in-addr.arpa /etc/bind/db.${FAKE_DB_NUMBER}
 systemctl restart bind9
 systemctl status bind9
 ping 8.8.8.8
