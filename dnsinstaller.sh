@@ -159,43 +159,22 @@ do_undo() {
   rm -f /etc/netplan/60-static-hostonly.yaml 2>/dev/null || true
   rm -f /etc/netplan/50-dhcp-internet.yaml 2>/dev/null || true
 
-  # Also remove old-style configs that the previous version may have created
-  # Check all yaml files for non-DHCP static configs and remove them
-  for f in /etc/netplan/*.yaml; do
-    if [[ -f "$f" ]]; then
-      # If the file has dhcp4: no (static config), remove it
-      if grep -q "dhcp4: no" "$f" 2>/dev/null; then
-        log_warn "Removing static netplan config: $f"
-        rm -f "$f"
-      fi
-    fi
-  done
+  # Remove ALL netplan yaml files (we'll create a clean DHCP-only one)
+  log_warn "Removing all netplan configs..."
+  rm -f /etc/netplan/*.yaml 2>/dev/null || true
 
   # -----------------------------------------------
-  # 6. Ensure DHCP netplan config exists for internet
+  # 6. Restore DHCP-only netplan config
   # -----------------------------------------------
   log_info "UNDO [6/9]: Restoring DHCP-only netplan config..."
-
-  # Check if any netplan file covers the DHCP interface
-  local has_dhcp_config=false
-  for f in /etc/netplan/*.yaml; do
-    if [[ -f "$f" ]] && grep -q "${DHCP_IFACE}" "$f" 2>/dev/null; then
-      has_dhcp_config=true
-      break
-    fi
-  done
-
-  if [[ "$has_dhcp_config" == "false" ]]; then
-    # No config for DHCP interface, create one
-    cat > /etc/netplan/50-cloud-init.yaml <<EOF
+  cat > /etc/netplan/50-cloud-init.yaml <<EOF
 network:
-  version: 2
   ethernets:
     ${DHCP_IFACE}:
-      dhcp4: yes
+      dhcp4: true
+  version: 2
 EOF
-    chmod 600 /etc/netplan/50-cloud-init.yaml
-  fi
+  chmod 600 /etc/netplan/50-cloud-init.yaml
 
   # -----------------------------------------------
   # 7. Remove cloud-init network disable
@@ -215,9 +194,19 @@ EOF
   # 8. Restore default DNS resolution
   # -----------------------------------------------
   log_info "UNDO [8/9]: Restoring default DNS resolution..."
+
+  # Remove the immutable flag we set during install
+  chattr -i /etc/resolv.conf 2>/dev/null || true
+
+  # Remove custom systemd-resolved config
+  rm -f /etc/systemd/resolved.conf.d/local-dns.conf 2>/dev/null || true
+  rmdir /etc/systemd/resolved.conf.d 2>/dev/null || true
+
   # Restart systemd-resolved to restore default DNS
   systemctl restart systemd-resolved 2>/dev/null || true
-  # Re-link resolv.conf to systemd-resolved
+
+  # Re-link resolv.conf to systemd-resolved (default Ubuntu behavior)
+  rm -f /etc/resolv.conf 2>/dev/null || true
   ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf 2>/dev/null || true
 
   # -----------------------------------------------
@@ -339,61 +328,34 @@ do_install() {
 
   # ===============================
   # STEP 4: Configure static IP using netplan
-  # ONLY touches the static interface, leaves DHCP interface alone
-  # Creates a SEPARATE netplan file for the static interface
+  # Single file with both interfaces:
+  #   - DHCP interface (internet) stays dhcp4: true
+  #   - Static interface (host-only) gets the static IP
   # ===============================
   log_info "STEP 4: Configuring netplan static IP..."
 
-  # First, check if there's an existing netplan file that manages the DHCP iface
-  EXISTING_NETPLAN=$(ls /etc/netplan/*.yaml 2>/dev/null | head -1 || echo "")
+  # Remove any old netplan files to start clean
+  rm -f /etc/netplan/*.yaml 2>/dev/null || true
 
-  # Create a SEPARATE netplan file for the static interface only
-  NETPLAN_STATIC="/etc/netplan/60-static-hostonly.yaml"
-
-  cat > "$NETPLAN_STATIC" <<EOF
+  # Create single netplan file with both interfaces
+  NETPLAN_FILE="/etc/netplan/50-cloud-init.yaml"
+  cat > "$NETPLAN_FILE" <<EOF
 network:
-  version: 2
   ethernets:
+    ${DHCP_IFACE}:
+      dhcp4: true
     ${STATIC_IFACE}:
-      dhcp4: no
+      dhcp4: false
       addresses:
         - ${STATIC_IP}/24
-      nameservers:
-        addresses:
-          - ${STATIC_IP}
-          - 8.8.8.8
-EOF
-
-  # Make sure DHCP iface config exists
-  if [[ -n "$EXISTING_NETPLAN" ]]; then
-    if ! grep -q "${DHCP_IFACE}" "$EXISTING_NETPLAN" 2>/dev/null; then
-      NETPLAN_DHCP="/etc/netplan/50-dhcp-internet.yaml"
-      cat > "$NETPLAN_DHCP" <<EOF
-network:
   version: 2
-  ethernets:
-    ${DHCP_IFACE}:
-      dhcp4: yes
 EOF
-      chmod 600 "$NETPLAN_DHCP"
-    fi
-  else
-    NETPLAN_DHCP="/etc/netplan/50-dhcp-internet.yaml"
-    cat > "$NETPLAN_DHCP" <<EOF
-network:
-  version: 2
-  ethernets:
-    ${DHCP_IFACE}:
-      dhcp4: yes
-EOF
-    chmod 600 "$NETPLAN_DHCP"
-  fi
 
   # ===============================
   # STEP 5: Set file permission chmod 600 netplan file
   # ===============================
   log_info "STEP 5: Setting netplan file permissions..."
-  chmod 600 "$NETPLAN_STATIC"
+  chmod 600 "$NETPLAN_FILE"
 
   # ===============================
   # STEP 6: Run netplan apply
@@ -572,16 +534,51 @@ EOF
   # STEP 21: Run resolvconf -u
   # ===============================
   log_info "STEP 21: Updating resolvconf..."
-  resolvconf -u
+  resolvconf -u 2>/dev/null || true
+
+  # ===============================
+  # STEP 21b: Force system to ACTUALLY use our local bind9 DNS
+  # This is needed because systemd-resolved ignores resolvconf
+  # on modern Ubuntu (20.04+). Without this, nslookup will fail.
+  # ===============================
+  log_info "STEP 21b: Forcing system to use local DNS server..."
+
+  # Method 1: Configure systemd-resolved to forward to our bind9
+  mkdir -p /etc/systemd/resolved.conf.d
+  cat > /etc/systemd/resolved.conf.d/local-dns.conf <<EOF
+[Resolve]
+DNS=${STATIC_IP}
+Domains=~.
+EOF
+  systemctl restart systemd-resolved 2>/dev/null || true
+
+  # Method 2: Direct resolv.conf override (most reliable)
+  # Remove the symlink to systemd-resolved stub and write our own
+  rm -f /etc/resolv.conf 2>/dev/null || true
+  cat > /etc/resolv.conf <<EOF
+# Generated by DNS installer - points to local bind9
+nameserver ${STATIC_IP}
+nameserver 8.8.8.8
+EOF
+
+  # Prevent NetworkManager/systemd from overwriting resolv.conf
+  chattr +i /etc/resolv.conf 2>/dev/null || true
+
+  # Give bind9 a moment to be fully ready
+  sleep 2
 
   # ===============================
   # STEP 22: Run testing with nslookup
   # ===============================
   log_info "STEP 22: Running DNS tests..."
-  nslookup "$STATIC_IP" || true
-  nslookup "$WWW_IP" || true
-  nslookup "$DOMAIN_NAME" || true
-  nslookup "www.${DOMAIN_NAME}" || true
+  echo ""
+  echo "--- Testing reverse lookup (IP -> name) ---"
+  nslookup "$STATIC_IP" "${STATIC_IP}" || true
+  nslookup "$WWW_IP" "${STATIC_IP}" || true
+  echo ""
+  echo "--- Testing forward lookup (name -> IP) ---"
+  nslookup "$DOMAIN_NAME" "${STATIC_IP}" || true
+  nslookup "www.${DOMAIN_NAME}" "${STATIC_IP}" || true
 
   log_success "DNS Installed Successfully"
 
@@ -676,8 +673,8 @@ sudo su
 ip a
 nano /etc/cloud/cloud.cfg.d/99-installer.cfg
 ls /etc/netplan
-nano /etc/netplan/60-static-hostonly.yaml
-chmod 600 /etc/netplan/60-static-hostonly.yaml
+nano /etc/netplan/50-cloud-init.yaml
+chmod 600 /etc/netplan/50-cloud-init.yaml
 netplan apply
 ip a
 ip a
