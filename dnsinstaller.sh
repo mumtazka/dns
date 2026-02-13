@@ -433,8 +433,7 @@ EOF
   # ===============================
   log_info "STEP 12: Configuring named.conf.options forwarders..."
   OPTIONS_FILE="/etc/bind/named.conf.options"
-  if ! grep -q "forwarders" "$OPTIONS_FILE"; then
-    cat > "$OPTIONS_FILE" <<EOF
+  cat > "$OPTIONS_FILE" <<EOF
 options {
   directory "/var/cache/bind";
 
@@ -447,9 +446,6 @@ options {
   listen-on-v6 { any; };
 };
 EOF
-  else
-    perl -0777 -i -pe 's/forwarders\s*\{[^}]*\};/forwarders {\n    1.1.1.1;\n    8.8.8.8;\n  };/s' "$OPTIONS_FILE"
-  fi
 
   # ===============================
   # STEP 13: Copy zone templates
@@ -520,10 +516,10 @@ EOF
                         2419200         ; Expire
                          604800 )       ; Negative Cache TTL
 ;
-@       IN      NS      ${DOMAIN_NAME}.
-${ip4}  IN      PTR     ${DOMAIN_NAME}.
-${WWW_IP##*.}  IN      PTR     www.${DOMAIN_NAME}.
-${WWW_IP##*.}  IN      PTR     mail.${DOMAIN_NAME}.
+@	IN	NS	${DOMAIN_NAME}.
+${ip4}	IN	PTR	${DOMAIN_NAME}.
+${WWW_IP##*.}	IN	PTR	www.${DOMAIN_NAME}.
+${WWW_IP##*.}	IN	PTR	mail.${DOMAIN_NAME}.
 EOF
 
   # ===============================
