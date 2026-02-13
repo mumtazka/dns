@@ -210,9 +210,18 @@ EOF
   ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf 2>/dev/null || true
 
   # -----------------------------------------------
-  # 9. Apply netplan to finalize
+  # 9. Revert IPv4 forwarding in sysctl.conf
   # -----------------------------------------------
-  log_info "UNDO [9/9]: Applying netplan..."
+  log_info "UNDO [9/10]: Reverting IPv4 forwarding in sysctl.conf..."
+  if [[ -f /etc/sysctl.conf ]]; then
+    sed -i 's/^net.ipv4.ip_forward=1/#net.ipv4.ip_forward=1/' /etc/sysctl.conf 2>/dev/null || true
+    sysctl -p 2>/dev/null || true
+  fi
+
+  # -----------------------------------------------
+  # 10. Apply netplan to finalize
+  # -----------------------------------------------
+  log_info "UNDO [10/10]: Applying netplan..."
   netplan apply 2>/dev/null || true
   sleep 3
 
@@ -382,6 +391,18 @@ EOF
     log_error "WARNING: Internet connectivity may be down. Continuing anyway..."
     log_error "If apt commands fail, check your DHCP interface (${DHCP_IFACE})."
   fi
+
+  # ===============================
+  # STEP 7c: Enable IPv4 forwarding in /etc/sysctl.conf
+  # Uncomment net.ipv4.ip_forward=1
+  # ===============================
+  log_info "STEP 7c: Enabling IPv4 forwarding in /etc/sysctl.conf..."
+  if grep -q '^#net.ipv4.ip_forward=1' /etc/sysctl.conf; then
+    sed -i 's/^#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+  elif ! grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf; then
+    echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+  fi
+  sysctl -p
 
   # ===============================
   # STEP 8: Run apt update
@@ -692,6 +713,8 @@ chmod 600 /etc/netplan/25-cloud-init.yaml
 netplan apply
 ip a
 ip a
+nano /etc/sysctl.conf
+sysctl -p
 apt update
 ping 8.8.8.8
 apt install bind9
