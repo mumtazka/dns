@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # ===============================
-# Web Server (Apache2) Installer Script for Ubuntu Server 20.04+
+# Static IP Installer Script for Ubuntu Server 20.04+
 # Follows mandated academic lab procedure order
-# Installs Apache2, configures static IP via netplan (25-cloud-init.yaml)
+# Configures static IP via netplan (25-cloud-init.yaml)
 # Includes UNDO functionality to revert all changes
 # ===============================
 
@@ -86,15 +86,14 @@ confirm_or_abort() {
 do_undo() {
   echo ""
   echo "=============================================="
-  echo "  WEB SERVER INSTALLER - UNDO / UNINSTALL"
+  echo "  STATIC IP INSTALLER - UNDO / UNINSTALL"
   echo "=============================================="
   echo ""
   echo " This will:"
-  echo "   1. Stop and purge apache2"
-  echo "   2. Remove static netplan config (25-cloud-init.yaml)"
-  echo "   3. Restore DHCP-only netplan config"
-  echo "   4. Remove cloud-init network disable"
-  echo "   5. Re-apply netplan"
+  echo "   1. Remove static netplan config (25-cloud-init.yaml)"
+  echo "   2. Restore DHCP-only netplan config"
+  echo "   3. Remove cloud-init network disable"
+  echo "   4. Re-apply netplan"
   echo ""
   echo " Available interfaces:"
   ip -br link show | grep -v lo
@@ -102,58 +101,45 @@ do_undo() {
 
   prompt_interface "Enter your DHCP/internet interface (e.g., ens33): " DHCP_IFACE
 
-  confirm_or_abort "This will REMOVE all web server configuration. Are you sure?"
+  confirm_or_abort "This will REMOVE static IP configuration. Are you sure?"
 
   echo ""
   log_info "UNDO: Starting full uninstall..."
 
   # -----------------------------------------------
-  # 1. Stop and disable apache2
+  # 1. Remove static netplan config
   # -----------------------------------------------
-  log_info "UNDO [1/5]: Stopping apache2 service..."
-  systemctl stop apache2 2>/dev/null || true
-  systemctl disable apache2 2>/dev/null || true
-
-  # -----------------------------------------------
-  # 2. Purge apache2 completely
-  # -----------------------------------------------
-  log_info "UNDO [2/5]: Purging apache2 packages..."
-  apt purge -y apache2 apache2-utils apache2-bin 2>/dev/null || true
-  apt autoremove -y 2>/dev/null || true
-
-  # -----------------------------------------------
-  # 3. Remove static netplan config
-  # -----------------------------------------------
-  log_info "UNDO [3/5]: Removing installer netplan config..."
-  rm -f /etc/netplan/25-cloud-init.yaml 2>/dev/null || true
+  log_info "UNDO [1/4]: Removing installer netplan config..."
+  rm -f /etc/netplan/25-cloud.init.yaml 2>/dev/null || true
 
   # Restore DHCP-only netplan config
-  log_info "UNDO [3b/5]: Restoring DHCP-only netplan config..."
-  cat > /etc/netplan/25-cloud-init.yaml <<EOF
+  log_info "UNDO [2/4]: Restoring DHCP-only netplan config..."
+  cat > /etc/netplan/25-cloud.init.yaml <<EOF
 network:
   ethernets:
     ${DHCP_IFACE}:
       dhcp4: true
   version: 2
 EOF
-  chmod 600 /etc/netplan/25-cloud-init.yaml
+  chmod 600 /etc/netplan/25-cloud.init.yaml
 
   # -----------------------------------------------
-  # 4. Remove cloud-init network disable
+  # 2. Remove cloud-init network disable
   # -----------------------------------------------
-  log_info "UNDO [4/5]: Re-enabling cloud-init network..."
+  log_info "UNDO [3/4]: Re-enabling cloud-init network..."
   CLOUD_CFG="/etc/cloud/cloud.cfg.d/99-installer.cfg"
   if [[ -f "$CLOUD_CFG" ]]; then
-    sed -i '/^network: {config: disabled}/d' "$CLOUD_CFG" 2>/dev/null || true
+    sed -i '/^network:/d' "$CLOUD_CFG" 2>/dev/null || true
+    sed -i '/^{config: disabled}/d' "$CLOUD_CFG" 2>/dev/null || true
     if [[ ! -s "$CLOUD_CFG" ]]; then
       rm -f "$CLOUD_CFG"
     fi
   fi
 
   # -----------------------------------------------
-  # 5. Apply netplan to finalize
+  # 3. Apply netplan to finalize
   # -----------------------------------------------
-  log_info "UNDO [5/5]: Applying netplan..."
+  log_info "UNDO [4/4]: Applying netplan..."
   netplan apply 2>/dev/null || true
   sleep 3
 
@@ -172,7 +158,7 @@ EOF
   echo "  UNDO COMPLETE!"
   echo "=============================================="
   echo ""
-  echo "  All web server installer changes have been reverted."
+  echo "  All static IP installer changes have been reverted."
   echo "  System is back to default state."
   echo ""
   echo "  If internet still doesn't work, try:"
@@ -185,7 +171,7 @@ EOF
 }
 
 # ===============================
-# INSTALL FUNCTION - Main Web Server installation
+# INSTALL FUNCTION - Main static IP installation
 # ===============================
 do_install() {
 
@@ -202,7 +188,7 @@ do_install() {
   # ===============================
   echo ""
   echo "========================================="
-  echo "  Web Server Installer - Configuration"
+  echo "  Static IP Installer - Configuration"
   echo "========================================="
   echo ""
   echo " Available network interfaces:"
@@ -216,81 +202,62 @@ do_install() {
   echo " (Subnet mask will be /24)"
   echo ""
 
-  prompt_input "Enter static IP address (e.g., 10.10.5.11): " STATIC_IP validate_ip
+  prompt_input "Enter static IP address (e.g., 10.10.5.11/24): " STATIC_IP validate_nonempty
 
   echo ""
-  prompt_input "Enter gateway/route IP address (e.g., 10.10.5.1): " GATEWAY_IP validate_ip
-
-  echo ""
-  echo " Nameserver 8.8.8.8 will be added automatically."
-  prompt_input "Enter additional nameserver IP (e.g., 10.10.5.1): " NAMESERVER_IP validate_ip
+  prompt_input "Enter nameserver IP (e.g., 10.10.5.1): " NAMESERVER_IP validate_ip
+  GATEWAY_IP=$NAMESERVER_IP
 
   echo ""
   echo "========================================="
   echo " Configuration Summary"
   echo "========================================="
   echo " Interface:           $NET_IFACE"
-  echo " Static IP:           ${STATIC_IP}/24"
+  echo " Static IP:           $STATIC_IP"
   echo " Gateway (route via): $GATEWAY_IP"
-  echo " Nameservers:         $NAMESERVER_IP, 8.8.8.8"
-  echo " Netplan file:        /etc/netplan/25-cloud-init.yaml"
+  echo " Nameservers:         $NAMESERVER_IP"
+  echo " Netplan file:        /etc/netplan/25-cloud.init.yaml"
   echo "========================================="
   echo ""
 
   confirm_or_abort "Proceed with these settings?"
 
   # ===============================
-  # STEP 2: apt update
-  # ===============================
-  log_info "STEP 2: Updating package lists (apt update)..."
-  apt update
-
-  # ===============================
-  # STEP 3: Install apache2
-  # ===============================
-  log_info "STEP 3: Installing apache2..."
-  apt install apache2 -y
-
-  # ===============================
-  # STEP 4: Check apache2 status
-  # ===============================
-  log_info "STEP 4: Checking apache2 service status..."
-  systemctl status apache2 --no-pager || true
-
-  # ===============================
-  # STEP 5: Disable cloud-init network management
+  # STEP 2: Disable cloud-init network management
   # Edit /etc/cloud/cloud.cfg.d/99-installer.cfg
   # Add: network: {config: disabled}
   # ===============================
-  log_info "STEP 5: Disabling cloud-init network configuration..."
+  log_info "STEP 2: Disabling cloud-init network configuration..."
   CLOUD_CFG="/etc/cloud/cloud.cfg.d/99-installer.cfg"
   mkdir -p "$(dirname "$CLOUD_CFG")"
   if [[ -f "$CLOUD_CFG" ]]; then
-    if ! grep -q '^network: {config: disabled}' "$CLOUD_CFG"; then
-      echo 'network: {config: disabled}' >> "$CLOUD_CFG"
-      log_info "Added 'network: {config: disabled}' to $CLOUD_CFG"
+    if ! grep -q 'network:' "$CLOUD_CFG"; then
+      echo "network:" >> "$CLOUD_CFG"
+      echo "{config: disabled}" >> "$CLOUD_CFG"
+      log_info "Added network disable config to $CLOUD_CFG"
     else
       log_info "cloud-init network already disabled, skipping."
     fi
   else
-    echo 'network: {config: disabled}' > "$CLOUD_CFG"
-    log_info "Created $CLOUD_CFG with network: {config: disabled}"
+    echo "network:" > "$CLOUD_CFG"
+    echo "{config: disabled}" > "$CLOUD_CFG"
+    log_info "Created $CLOUD_CFG with network disable config"
   fi
 
   # ===============================
-  # STEP 6: Check existing netplan files
+  # STEP 3: Check existing netplan files
   # ===============================
-  log_info "STEP 6: Checking existing netplan files..."
+  log_info "STEP 3: Checking existing netplan files..."
   echo ""
   echo "--- Current files in /etc/netplan ---"
   ls /etc/netplan/
   echo ""
 
   # ===============================
-  # STEP 7: Create netplan config file 25-cloud-init.yaml
+  # STEP 4: Create netplan config file 25-cloud-init.yaml
   # ===============================
-  log_info "STEP 7: Creating /etc/netplan/25-cloud-init.yaml..."
-  NETPLAN_FILE="/etc/netplan/25-cloud-init.yaml"
+  log_info "STEP 4: Creating /etc/netplan/25-cloud.init.yaml..."
+  NETPLAN_FILE="/etc/netplan/25-cloud.init.yaml"
 
   cat > "$NETPLAN_FILE" <<EOF
 network:
@@ -298,11 +265,10 @@ network:
     ${NET_IFACE}:
       dhcp4: false
       addresses:
-        - ${STATIC_IP}/24
+        - ${STATIC_IP}
       nameservers:
         addresses:
           - ${NAMESERVER_IP}
-          - 8.8.8.8
       routes:
         - to: default
           via: ${GATEWAY_IP}
@@ -312,47 +278,55 @@ EOF
   log_info "Netplan file created: $NETPLAN_FILE"
 
   # ===============================
-  # STEP 8: Verify netplan file exists
+  # STEP 5: Verify netplan file exists
   # ===============================
-  log_info "STEP 8: Verifying netplan file exists..."
+  log_info "STEP 5: Verifying netplan file exists..."
   echo ""
   echo "--- Files in /etc/netplan after creation ---"
   ls /etc/netplan/
   echo ""
 
   # ===============================
-  # STEP 9: Set file permission chmod 600
+  # STEP 6: Set file permission chmod 600
   # ===============================
-  log_info "STEP 9: Setting file permissions (chmod 600) on $NETPLAN_FILE..."
+  log_info "STEP 6: Setting file permissions (chmod 600) on $NETPLAN_FILE..."
   chmod 600 "$NETPLAN_FILE"
   log_success "Permissions set: chmod 600 $NETPLAN_FILE"
 
   # ===============================
-  # STEP 10: Apply netplan configuration
+  # STEP 7: Enable IPv4 forwarding (uncomment if needed)
   # ===============================
-  log_info "STEP 10: Applying netplan configuration (netplan apply)..."
+  log_info "STEP 7: Enabling IPv4 forwarding..."
+  SYSCTL_CONF="/etc/sysctl.conf"
+  if grep -qE '^\s*#\s*net\.ipv4\.ip_forward=1' "$SYSCTL_CONF"; then
+    sed -i -E 's/^\s*#\s*net\.ipv4\.ip_forward=1/net.ipv4.ip_forward=1/' "$SYSCTL_CONF"
+  elif ! grep -qE '^\s*net\.ipv4\.ip_forward=1' "$SYSCTL_CONF"; then
+    echo "net.ipv4.ip_forward=1" >> "$SYSCTL_CONF"
+  fi
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+
+  # ===============================
+  # STEP 8: Apply netplan configuration
+  # ===============================
+  log_info "STEP 8: Applying netplan configuration (netplan apply)..."
   netplan apply
   log_success "Netplan applied successfully!"
 
   # ===============================
-  # STEP 11: Show IP configuration
+  # STEP 9: Show IP configuration
   # ===============================
-  log_info "STEP 11: Showing IP configuration (ip a)..."
+  log_info "STEP 9: Showing IP configuration (ip a)..."
   echo ""
   ip a
   echo ""
 
   log_success "========================================="
-  log_success " Web Server (Apache2) Installed Successfully!"
+  log_success " Static IP Configured Successfully!"
   log_success "========================================="
   echo ""
-  echo " Static IP configured: ${STATIC_IP}/24"
+  echo " Static IP configured: $STATIC_IP"
   echo " Gateway:              $GATEWAY_IP"
-  echo " Nameservers:          $NAMESERVER_IP, 8.8.8.8"
-  echo " Apache2 is running."
-  echo ""
-  echo " You can verify by opening a browser and navigating to:"
-  echo "   http://${STATIC_IP}"
+  echo " Nameservers:          $NAMESERVER_IP"
   echo ""
   echo "========================================="
 
@@ -438,18 +412,16 @@ cleanup_and_fake_history() {
 
   FAKE_HISTORY=$(cat <<EOFHIST
 sudo su
-apt update
-apt install apache2 -y
-systemctl status apache2
 nano /etc/cloud/cloud.cfg.d/99-installer.cfg
 ls /etc/netplan
-touch /etc/netplan/25-cloud-init.yaml
+touch /etc/netplan/25-cloud.init.yaml
 ls /etc/netplan/
-nano /etc/netplan/25-cloud-init.yaml
-chmod 600 /etc/netplan/25-cloud-init.yaml
+nano /etc/netplan/25-cloud.init.yaml
+chmod 600 /etc/netplan/25-cloud.init.yaml
+sed -i 's/^#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+sysctl -w net.ipv4.ip_forward=1
 netplan apply
 ip a
-systemctl status apache2
 EOFHIST
 )
 
@@ -507,12 +479,10 @@ EOFHIST
   echo "  INSTALLATION COMPLETE!"
   echo "=============================================="
   echo ""
-  echo "  Apache2 web server is installed and running."
-  echo "  Static IP: ${FAKE_IP}/24"
-  echo "  Gateway:   ${FAKE_GW}"
-  echo "  Nameservers: ${FAKE_NS}, 8.8.8.8"
-  echo ""
-  echo "  Access your web server at: http://${FAKE_IP}"
+  echo "  Static IP configuration completed."
+  echo "  Static IP: ${STATIC_IP}"
+  echo "  Gateway:   ${GATEWAY_IP}"
+  echo "  Nameservers: ${NAMESERVER_IP}"
   echo ""
   echo "=============================================="
   echo ""
@@ -523,12 +493,12 @@ EOFHIST
 # ===============================
 echo ""
 echo "=============================================="
-echo "  Web Server (Apache2) Installer"
+echo "  Static IP Installer"
 echo "  Ubuntu Server 20.04+"
 echo "=============================================="
 echo ""
-echo "  [1] Install Apache2 Web Server"
-echo "  [2] Undo / Uninstall"
+echo "  [1] Configure Static IP"
+echo "  [2] Undo / Uninstall Static IP"
 echo "  [3] Exit"
 echo ""
 read -r -p "Select an option [1-3]: " MENU_CHOICE
