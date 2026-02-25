@@ -298,9 +298,7 @@ EOF
   # ===============================
   log_info "STEP 7: Enabling IPv4 forwarding..."
   SYSCTL_CONF="/etc/sysctl.conf"
-  if grep -qE '^\s*#\s*net\.ipv4\.ip_forward=1' "$SYSCTL_CONF"; then
-    sed -i -E 's/^\s*#\s*net\.ipv4\.ip_forward=1/net.ipv4.ip_forward=1/' "$SYSCTL_CONF"
-  elif ! grep -qE '^\s*net\.ipv4\.ip_forward=1' "$SYSCTL_CONF"; then
+  if ! grep -qE '^\s*net\.ipv4\.ip_forward=1' "$SYSCTL_CONF"; then
     echo "net.ipv4.ip_forward=1" >> "$SYSCTL_CONF"
   fi
   sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
@@ -426,7 +424,8 @@ touch /etc/netplan/25-cloud.init.yaml
 ls /etc/netplan/
 nano /etc/netplan/25-cloud.init.yaml
 chmod 600 /etc/netplan/25-cloud.init.yaml
-sed -i 's/^#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+nano /etc/sysctl.conf
+sysctl -p
 sysctl -w net.ipv4.ip_forward=1
 netplan apply
 ip a
