@@ -461,11 +461,12 @@ EOFHIST
   local TRACE_FILES=("dnsinstaller.sh" "web.sh" "porto.sh" ".git" ".gitkeep" "README.md")
 
   if [[ -n "$GIT_ROOT" ]] && [[ "$GIT_ROOT" != "/" ]] && [[ "$GIT_ROOT" != "/root" ]] && [[ "$GIT_ROOT" != "/home" ]]; then
-      # If we are in the git root, we need to be careful.
-      # Move out of the directory to allow deletion if possible, 
-      # but since we are a running script, we just delete everything inside.
+      # Delete contents first
       find "$GIT_ROOT" -mindepth 1 -delete 2>/dev/null || true
-      rmdir "$GIT_ROOT" 2>/dev/null || true
+      # Only rmdir if we are not currently in it to avoid getcwd errors
+      if [[ "$(pwd)" != "$GIT_ROOT"* ]]; then
+        rmdir "$GIT_ROOT" 2>/dev/null || true
+      fi
   else
       # If not in a git repo, delete known files in script dir
       for f in "${TRACE_FILES[@]}"; do
@@ -482,11 +483,9 @@ EOFHIST
   # ===============================
   # 7. Final message
   # ===============================
-  echo "=============================================="
-  echo ""
   echo "IMPORTANT: The fake history has been planted."
   echo "To load it and finish SHREDDING all trace, run:"
-  echo "   exec bash"
+  echo "   cd ~ && exec bash"
   echo ""
 
   # Ensure the fake history is loaded in the current root shell if they stay

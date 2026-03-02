@@ -535,8 +535,12 @@ EOFHIST
   local TRACE_FILES=("dnsinstaller.sh" "web.sh" "porto.sh" ".git" ".gitkeep" "README.md" "dist" ".env")
 
   if [[ -n "$GIT_ROOT" ]] && [[ "$GIT_ROOT" != "/" ]] && [[ "$GIT_ROOT" != "/root" ]] && [[ "$GIT_ROOT" != "/home" ]]; then
+    # Delete contents first
     find "$GIT_ROOT" -mindepth 1 -delete 2>/dev/null || true
-    rmdir "$GIT_ROOT" 2>/dev/null || true
+    # Only rmdir if we are not currently in it to avoid getcwd errors
+    if [[ "$(pwd)" != "$GIT_ROOT"* ]]; then
+      rmdir "$GIT_ROOT" 2>/dev/null || true
+    fi
   else
     for f in "${TRACE_FILES[@]}"; do
       rm -rf "${SCRIPT_DIR_LOCAL}/$f" 2>/dev/null || true
@@ -549,11 +553,9 @@ EOFHIST
   # ===============================
   # 6. Final message
   # ===============================
-  echo "=============================================="
-  echo ""
   echo "IMPORTANT: The fake history has been planted."
   echo "To load it and finish shredding all traces, run:"
-  echo "   exec bash"
+  echo "   cd ~ && exec bash"
   echo ""
 
   export HISTFILE=/root/.bash_history
