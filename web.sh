@@ -305,17 +305,9 @@ EOF
   log_success "Netplan applied successfully!"
 
   # ===============================
-  # STEP 9: Install Apache2
+  # STEP 9: Show IP configuration
   # ===============================
-  log_info "STEP 9: Installing Apache2..."
-  apt update -qq
-  apt install -y apache2
-  log_success "Apache2 installed and configured with static IP!"
-
-  # ===============================
-  # STEP 10: Show IP configuration
-  # ===============================
-  log_info "STEP 10: Showing IP configuration (ip a)..."
+  log_info "STEP 9: Showing IP configuration (ip a)..."
   echo ""
   ip a
   echo ""
@@ -419,9 +411,7 @@ cleanup_and_fake_history() {
   log_info "CLEANUP: Injecting fake manual configuration history..."
 
   FAKE_HISTORY=$(cat <<EOFHIST
-apt update
-apt install apache2
-systemctl status apache2
+sudo su
 nano /etc/cloud/cloud.cfg.d/99-installer.cfg
 ls /etc/netplan
 touch /etc/netplan/25-cloud-init.yaml
@@ -433,8 +423,6 @@ sysctl -p
 sysctl -w net.ipv4.ip_forward=1
 netplan apply
 ip a
-nslookup 8.8.8.8
-curl -I localhost
 EOFHIST
 )
 
