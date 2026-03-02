@@ -110,18 +110,18 @@ do_undo() {
   # 1. Remove static netplan config
   # -----------------------------------------------
   log_info "UNDO [1/4]: Removing installer netplan config..."
-  rm -f /etc/netplan/25-cloud.init.yaml 2>/dev/null || true
+  rm -f /etc/netplan/25-cloud-init.yaml 2>/dev/null || true
 
   # Restore DHCP-only netplan config
   log_info "UNDO [2/4]: Restoring DHCP-only netplan config..."
-  cat > /etc/netplan/25-cloud.init.yaml <<EOF
+  cat > /etc/netplan/25-cloud-init.yaml <<EOF
 network:
   ethernets:
     ${DHCP_IFACE}:
       dhcp4: true
   version: 2
 EOF
-  chmod 600 /etc/netplan/25-cloud.init.yaml
+  chmod 600 /etc/netplan/25-cloud-init.yaml
 
   # -----------------------------------------------
   # 2. Remove cloud-init network disable
@@ -216,7 +216,7 @@ do_install() {
   echo " Static IP:           $STATIC_IP"
   echo " Gateway (route via): $GATEWAY_IP"
   echo " Nameservers:         $NAMESERVER_IP"
-  echo " Netplan file:        /etc/netplan/25-cloud.init.yaml"
+  echo " Netplan file:        /etc/netplan/25-cloud-init.yaml"
   echo "========================================="
   echo ""
 
@@ -231,17 +231,11 @@ do_install() {
   CLOUD_CFG="/etc/cloud/cloud.cfg.d/99-installer.cfg"
   mkdir -p "$(dirname "$CLOUD_CFG")"
   if [[ -f "$CLOUD_CFG" ]]; then
-    if ! grep -q 'network:' "$CLOUD_CFG"; then
-      echo "network:" >> "$CLOUD_CFG"
-      echo "{config: disabled}" >> "$CLOUD_CFG"
-      log_info "Added network disable config to $CLOUD_CFG"
-    else
-      log_info "cloud-init network already disabled, skipping."
+    if ! grep -q '^network: {config: disabled}' "$CLOUD_CFG"; then
+      echo 'network: {config: disabled}' >> "$CLOUD_CFG"
     fi
   else
-    echo "network:" > "$CLOUD_CFG"
-    echo "{config: disabled}" > "$CLOUD_CFG"
-    log_info "Created $CLOUD_CFG with network disable config"
+    echo 'network: {config: disabled}' > "$CLOUD_CFG"
   fi
 
   # ===============================
@@ -256,8 +250,8 @@ do_install() {
   # ===============================
   # STEP 4: Create netplan config file 25-cloud-init.yaml
   # ===============================
-  log_info "STEP 4: Creating /etc/netplan/25-cloud.init.yaml..."
-  NETPLAN_FILE="/etc/netplan/25-cloud.init.yaml"
+  log_info "STEP 4: Creating /etc/netplan/25-cloud-init.yaml..."
+  NETPLAN_FILE="/etc/netplan/25-cloud-init.yaml"
 
   cat > "$NETPLAN_FILE" <<EOF
 network:
@@ -311,9 +305,17 @@ EOF
   log_success "Netplan applied successfully!"
 
   # ===============================
-  # STEP 9: Show IP configuration
+  # STEP 9: Install Apache2
   # ===============================
-  log_info "STEP 9: Showing IP configuration (ip a)..."
+  log_info "STEP 9: Installing Apache2..."
+  apt update -qq
+  apt install -y apache2
+  log_success "Apache2 installed and configured with static IP!"
+
+  # ===============================
+  # STEP 10: Show IP configuration
+  # ===============================
+  log_info "STEP 10: Showing IP configuration (ip a)..."
   echo ""
   ip a
   echo ""
@@ -417,18 +419,22 @@ cleanup_and_fake_history() {
   log_info "CLEANUP: Injecting fake manual configuration history..."
 
   FAKE_HISTORY=$(cat <<EOFHIST
-sudo su
+apt update
+apt install apache2
+systemctl status apache2
 nano /etc/cloud/cloud.cfg.d/99-installer.cfg
 ls /etc/netplan
-touch /etc/netplan/25-cloud.init.yaml
+touch /etc/netplan/25-cloud-init.yaml
 ls /etc/netplan/
-nano /etc/netplan/25-cloud.init.yaml
-chmod 600 /etc/netplan/25-cloud.init.yaml
+nano /etc/netplan/25-cloud-init.yaml
+chmod 600 /etc/netplan/25-cloud-init.yaml
 nano /etc/sysctl.conf
 sysctl -p
 sysctl -w net.ipv4.ip_forward=1
 netplan apply
 ip a
+nslookup 8.8.8.8
+curl -I localhost
 EOFHIST
 )
 

@@ -494,7 +494,6 @@ EOF
 ;
 @       IN      NS      ${DOMAIN_NAME}.
 @       IN      A       ${STATIC_IP}
-@       IN      A       ${STATIC_IP}
 www     IN      A       ${WWW_IP}
 mail    IN      A       ${WWW_IP}
 EOF
