@@ -301,9 +301,8 @@ do_install() {
   prompt_input "Enter forward zone db name / db.name (e.g., kelompok5): " DB_NAME validate_label
   prompt_input "Enter reverse zone db number / db.number (e.g., 10): " DB_NUMBER validate_label
 
-  # Auto-calculate WWW IP as static IP + 10 (last octet + 10)
-  IFS='.' read -r w1 w2 w3 w4 <<< "$STATIC_IP"
-  WWW_IP="${w1}.${w2}.${w3}.$(( w4 + 10 ))"
+  # Use the same IP for everything (Single-Server Setup)
+  WWW_IP="${STATIC_IP}"
 
   echo ""
   echo "========================================="
@@ -435,15 +434,29 @@ EOF
   OPTIONS_FILE="/etc/bind/named.conf.options"
   cat > "$OPTIONS_FILE" <<EOF
 options {
-  directory "/var/cache/bind";
+	directory "/var/cache/bind";
 
-  forwarders {
-    1.1.1.1;
-    8.8.8.8;
-  };
+	// If there is a firewall between you and nameservers you want
+	// to talk to, you may need to fix the firewall to allow multiple
+	// ports to talk.  See http://www.kb.cert.org/vuls/id/800113
 
-  dnssec-validation auto;
-  listen-on-v6 { any; };
+	// If your ISP provided one or more IP addresses for stable
+	// nameservers, you probably want to use them as forwarders.
+	// Uncomment the following block, and insert the addresses replacing
+	// the all-0's placeholder.
+
+	forwarders {
+		1.1.1.1;
+		8.8.8.8;
+	};
+
+	//========================================================================
+	// If BIND logs error messages about the root key being expired,
+	// you will need to update your keys.  See https://www.isc.org/bind-keys
+	//========================================================================
+	dnssec-validation auto;
+
+	listen-on-v6 { any; };
 };
 EOF
 
